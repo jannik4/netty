@@ -6,17 +6,13 @@ use std::sync::Arc;
 fn simple() {
     let mut server = {
         let mut channels = Channels::new();
-        channels
-            .add_send::<ServerToClient>()
-            .add_recv::<ClientToServer>();
+        channels.add_send::<ServerToClient>().add_recv::<ClientToServer>();
         Server::new(Arc::new(channels))
     };
 
     let mut client = {
         let mut channels = Channels::new();
-        channels
-            .add_send::<ClientToServer>()
-            .add_recv::<ServerToClient>();
+        channels.add_send::<ClientToServer>().add_recv::<ServerToClient>();
         Client::new(Arc::new(channels))
     };
 
@@ -34,21 +30,11 @@ fn simple() {
     };
     assert!(server.process_events().next().is_none());
 
-    assert!(matches!(
-        client.process_events().next(),
-        Some(ClientEvent::Connected)
-    ));
+    assert!(matches!(client.process_events().next(), Some(ClientEvent::Connected)));
     assert!(client.process_events().next().is_none());
 
-    server.send_to(
-        ServerToClient {
-            data: "Hello Client".to_string(),
-        },
-        client_handle,
-    );
-    client.send(ClientToServer {
-        data: "Hello Server".to_string(),
-    });
+    server.send_to(ServerToClient { data: "Hello Client".to_string() }, client_handle);
+    client.send(ClientToServer { data: "Hello Server".to_string() });
     sleep(10);
 
     let (msg, msg_handle) = server.recv::<ClientToServer>().next().unwrap();
@@ -73,10 +59,7 @@ pub struct ServerToClient {
 
 impl NetworkMessage for ServerToClient {
     const CHANNEL_ID: ChannelId = ChannelId::new(0);
-    const CHANNEL_CONFIG: ChannelConfig = ChannelConfig {
-        reliable: true,
-        ordered: true,
-    };
+    const CHANNEL_CONFIG: ChannelConfig = ChannelConfig { reliable: true, ordered: true };
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,10 +69,7 @@ pub struct ClientToServer {
 
 impl NetworkMessage for ClientToServer {
     const CHANNEL_ID: ChannelId = ChannelId::new(0);
-    const CHANNEL_CONFIG: ChannelConfig = ChannelConfig {
-        reliable: true,
-        ordered: true,
-    };
+    const CHANNEL_CONFIG: ChannelConfig = ChannelConfig { reliable: true, ordered: true };
 }
 
 fn sleep(ms: u64) {

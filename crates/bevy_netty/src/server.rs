@@ -26,8 +26,7 @@ impl ServerChannelsBuilder<'_> {
         T: NetworkDecode + NetworkMessage + Send + Sync + 'static,
     {
         self.0.add_event::<FromClient<T>>();
-        self.0
-            .add_systems(PreUpdate, handle_recv::<T>.after(process_server_events));
+        self.0.add_systems(PreUpdate, handle_recv::<T>.after(process_server_events));
 
         self.1.add_recv::<T>();
 

@@ -90,9 +90,7 @@ where
     fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         use bincode::Options;
 
-        bincode::DefaultOptions::new()
-            .deserialize(buf)
-            .map_err(|e| DecodeError(Box::new(e)))
+        bincode::DefaultOptions::new().deserialize(buf).map_err(|e| DecodeError(Box::new(e)))
     }
 }
 

@@ -11,9 +11,7 @@ pub struct NettyPlugin;
 
 impl Plugin for NettyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_event::<ServerEvent>()
-            .add_systems(PreUpdate, server::process_server_events);
-        app.add_event::<ClientEvent>()
-            .add_systems(PreUpdate, client::process_client_events);
+        app.add_event::<ServerEvent>().add_systems(PreUpdate, server::process_server_events);
+        app.add_event::<ClientEvent>().add_systems(PreUpdate, client::process_client_events);
     }
 }
