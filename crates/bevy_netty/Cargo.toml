@@ -1,0 +1,10 @@
+[package]
+name = "bevy_netty"
+description = "bevy_netty - wip"
+version = "0.0.0"
+edition = "2021"
+authors = ["Jannik Obermann <jannik.obermann@gmail.com>"]
+repository = "https://github.com/jannik4/netty"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
