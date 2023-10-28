@@ -7,4 +7,12 @@ authors = ["Jannik Obermann <jannik.obermann@gmail.com>"]
 repository = "https://github.com/jannik4/netty"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["serde"]
+serde = ["netty/serde"]
+
 [dependencies]
+netty = { path = "../netty", default-features = false, features = ["bevy"] }
+
+bevy_app = { version = "0.11.3", default-features = false }
+bevy_ecs = { version = "0.11.3", default-features = false }
