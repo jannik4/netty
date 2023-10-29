@@ -76,7 +76,7 @@ impl Server {
         ProcessEvents(&mut self.state)
     }
 
-    pub fn send_to<T: NetworkEncode + NetworkMessage + Send + 'static>(
+    pub fn send_to<T: NetworkEncode + NetworkMessage + Send + Sync + 'static>(
         &self,
         message: T,
         handle: ConnectionHandle,
@@ -84,11 +84,26 @@ impl Server {
         self.channels.assert_send_exists(T::CHANNEL_ID);
         if let ServerState::Running(running) = &self.state {
             running.runner(handle.transport_idx).send_to(
-                Box::new(message),
+                Arc::new(message),
                 handle.connection_idx,
                 T::CHANNEL_ID,
                 T::CHANNEL_CONFIG,
             );
+        }
+    }
+
+    pub fn broadcast<T: NetworkEncode + NetworkMessage + Send + Sync + 'static>(&self, message: T) {
+        self.channels.assert_send_exists(T::CHANNEL_ID);
+        if let ServerState::Running(running) = &self.state {
+            let message: Arc<dyn NetworkEncode + Send + Sync> = Arc::new(message);
+            for handle in running.connections.keys() {
+                running.runner(handle.transport_idx).send_to(
+                    Arc::clone(&message),
+                    handle.connection_idx,
+                    T::CHANNEL_ID,
+                    T::CHANNEL_CONFIG,
+                );
+            }
         }
     }
 

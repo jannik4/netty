@@ -53,7 +53,7 @@ pub struct RunnerHandle {
 impl RunnerHandle {
     pub fn send_to(
         &self,
-        message: Box<dyn NetworkEncode + Send>,
+        message: Arc<dyn NetworkEncode + Send + Sync>,
         connection_idx: ConnectionIdx,
         channel_id: ChannelId,
         channel_config: ChannelConfig,
@@ -79,7 +79,7 @@ impl Drop for RunnerHandle {
 
 enum RunnerTask {
     SendTo {
-        message: Box<dyn NetworkEncode + Send>,
+        message: Arc<dyn NetworkEncode + Send + Sync>,
         connection_idx: ConnectionIdx,
         channel_id: ChannelId,
         channel_config: ChannelConfig,
