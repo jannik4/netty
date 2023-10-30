@@ -5,7 +5,10 @@ use bevy_app::{App, First, Plugin};
 use bevy_ecs::{event::Events, schedule::IntoSystemConfigs};
 use netty::{ClientEvent, ServerEvent};
 
-pub use self::client::{FromServer, ToServer};
+pub use self::{
+    client::{FromServer, ToServer},
+    server::{FromClient, ToClient},
+};
 pub use netty;
 
 pub struct NettyPlugin;
