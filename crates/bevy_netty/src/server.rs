@@ -1,4 +1,4 @@
-use bevy_app::{App, PostUpdate, PreUpdate};
+use bevy_app::{App, First, Last};
 use bevy_ecs::{
     event::{Event, EventWriter, Events},
     schedule::IntoSystemConfigs,
@@ -26,7 +26,12 @@ impl ServerChannelsBuilder<'_> {
         T: NetworkDecode + NetworkMessage + Send + Sync + 'static,
     {
         self.0.add_event::<FromClient<T>>();
-        self.0.add_systems(PreUpdate, handle_recv::<T>.after(process_server_events));
+        self.0.add_systems(
+            First,
+            handle_recv::<T>
+                .after(<Events<FromClient<T>>>::update_system)
+                .after(process_server_events),
+        );
 
         self.1.add_recv::<T>();
 
@@ -38,7 +43,7 @@ impl ServerChannelsBuilder<'_> {
         T: NetworkEncode + NetworkMessage + Send + Sync + 'static,
     {
         self.0.add_event::<ToClient<T>>();
-        self.0.add_systems(PostUpdate, handle_send::<T>);
+        self.0.add_systems(Last, handle_send::<T>);
 
         self.1.add_send::<T>();
 
