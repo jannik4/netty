@@ -3,7 +3,7 @@ use crate::{
     connection::ConnectionState,
     protocol::{self, InternalC2S, InternalS2C},
     transport::{ClientTransport, TransportError},
-    ChannelConfig, ChannelId, NetworkEncode, NetworkError,
+    ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError,
 };
 use crossbeam_channel::{Receiver, Sender};
 use std::{
@@ -17,7 +17,7 @@ use std::{
 
 pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
     transport: T,
-    connection: Arc<ConnectionState>,
+    channels: Arc<Channels>,
     intern_events: Sender<InternEvent>,
 ) -> RunnerHandle {
     // TODO: Remove this when reliability and ordering are implemented
@@ -30,7 +30,7 @@ pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
     Runner::run(Runner {
         is_alive: Arc::clone(&is_alive),
         transport,
-        connection,
+        connection: Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, &channels)),
         is_connected: AtomicBool::new(false),
         intern_events,
         tasks_recv,
@@ -187,7 +187,9 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     // TODO: Store connection_idx and uuid for ProvideId
 
                     self.is_connected.store(true, Ordering::Relaxed);
-                    self.intern_events.send(InternEvent::Connected).ok();
+                    self.intern_events
+                        .send(InternEvent::Connected(Arc::clone(&self.connection)))
+                        .ok();
                 }
                 Some(InternalS2C::Disconnect) => {
                     self.disconnect_and_stop(false);

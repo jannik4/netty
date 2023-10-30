@@ -13,7 +13,7 @@ enum ClientState {
     Running {
         runner: RunnerHandle,
         intern_recv: Receiver<InternEvent>,
-        connection: Arc<ConnectionState>,
+        connection: Option<Arc<ConnectionState>>,
     },
 }
 
@@ -31,12 +31,11 @@ impl Client {
     pub fn connect<T: ClientTransport + Send + Sync + 'static>(&mut self, transport: T) {
         self.disconnect();
 
-        let connection = Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, &self.channels));
         let (intern_send, intern_recv) = crossbeam_channel::unbounded();
 
-        let runner = runner::start(transport, Arc::clone(&connection), intern_send);
+        let runner = runner::start(transport, Arc::clone(&self.channels), intern_send);
 
-        self.state = ClientState::Running { runner, intern_recv, connection };
+        self.state = ClientState::Running { runner, intern_recv, connection: None };
     }
 
     pub fn disconnect(&mut self) {
@@ -62,9 +61,10 @@ impl Client {
         &self,
     ) -> impl Iterator<Item = T> + '_ {
         match &self.state {
-            ClientState::Running { connection, .. } => {
-                RecvIterator::Receiver(connection.get_receiver())
-            }
+            ClientState::Running { connection, .. } => match connection {
+                Some(connection) => RecvIterator::Receiver(connection.get_receiver()),
+                None => RecvIterator::Disconnected,
+            },
             ClientState::Disconnected => RecvIterator::Disconnected,
         }
     }
@@ -86,7 +86,7 @@ pub enum ClientEvent {
 }
 
 enum InternEvent {
-    Connected,
+    Connected(Arc<ConnectionState>),
     Disconnected,
     Error(NetworkError),
 }
@@ -115,11 +115,14 @@ impl Iterator for ProcessEvents<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.0 {
             ClientState::Disconnected => None,
-            ClientState::Running { intern_recv, .. } => {
+            ClientState::Running { intern_recv, connection, .. } => {
                 let event = intern_recv.try_recv().ok()?;
 
                 Some(match event {
-                    InternEvent::Connected => ClientEvent::Connected,
+                    InternEvent::Connected(conn) => {
+                        *connection = Some(conn);
+                        ClientEvent::Connected
+                    }
                     InternEvent::Disconnected => {
                         *self.0 = ClientState::Disconnected;
                         ClientEvent::Disconnected
