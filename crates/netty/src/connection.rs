@@ -1,9 +1,9 @@
 use crate::{
-    transport::TransportProperties, Channel, ChannelId, Channels, DecodeError, NetworkDecode,
-    NetworkMessage,
+    new_data::NewDataAvailable, transport::TransportProperties, Channel, ChannelId, Channels,
+    DecodeError, NetworkDecode, NetworkMessage,
 };
 use crossbeam_channel::Receiver;
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 pub struct ConnectionState {
     transport_properties: TransportProperties,
@@ -13,7 +13,11 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
-    pub(crate) fn new(transport_properties: TransportProperties, channels: &Channels) -> Self {
+    pub(crate) fn new(
+        transport_properties: TransportProperties,
+        new_data: Arc<NewDataAvailable>,
+        channels: &Channels,
+    ) -> Self {
         Self {
             transport_properties,
             send: channels
@@ -25,7 +29,7 @@ impl ConnectionState {
                 .recv
                 .iter()
                 .map(|(id, (channel, factory))| {
-                    let (decode, recv) = factory.0();
+                    let (decode, recv) = factory.0(Arc::clone(&new_data));
                     (*id, ChannelRecv { channel: channel.clone(), decode, recv })
                 })
                 .collect(),
@@ -79,7 +83,9 @@ struct ChannelRecv {
 
 pub(crate) struct DecodeRecvFactory(
     Box<
-        dyn Fn() -> (
+        dyn Fn(
+                Arc<NewDataAvailable>,
+            ) -> (
                 Box<dyn Fn(&[u8]) -> Result<(), DecodeError> + Send + Sync>,
                 Box<dyn Any + Send + Sync>,
             ) + Send
@@ -92,11 +98,12 @@ impl DecodeRecvFactory {
     where
         T: NetworkDecode + NetworkMessage + Send + 'static,
     {
-        Self(Box::new(|| {
+        Self(Box::new(|new_data| {
             let (sender, receiver) = crossbeam_channel::unbounded();
             let decode = Box::new(move |buf: &[u8]| {
                 let message = T::decode(buf)?;
                 sender.send(message).ok();
+                new_data.notify();
                 Ok(())
             });
             let recv = Box::new(receiver);

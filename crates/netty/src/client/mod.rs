@@ -2,11 +2,11 @@ mod runner;
 
 use self::runner::RunnerHandle;
 use crate::{
-    channel::Channels, connection::ConnectionState, transport::ClientTransport, NetworkDecode,
-    NetworkEncode, NetworkError, NetworkMessage,
+    channel::Channels, connection::ConnectionState, new_data::NewDataAvailable,
+    transport::ClientTransport, NetworkDecode, NetworkEncode, NetworkError, NetworkMessage,
 };
-use crossbeam_channel::Receiver;
-use std::sync::Arc;
+use crossbeam_channel::{Receiver, Sender};
+use std::{sync::Arc, time::Duration};
 
 enum ClientState {
     Disconnected,
@@ -14,6 +14,7 @@ enum ClientState {
         runner: RunnerHandle,
         intern_recv: Receiver<InternEvent>,
         connection: Option<Arc<ConnectionState>>,
+        new_data: Arc<NewDataAvailable>,
     },
 }
 
@@ -32,10 +33,16 @@ impl Client {
         self.disconnect();
 
         let (intern_send, intern_recv) = crossbeam_channel::unbounded();
+        let new_data = Arc::new(NewDataAvailable::new());
 
-        let runner = runner::start(transport, Arc::clone(&self.channels), intern_send);
+        let runner = runner::start(
+            transport,
+            Arc::clone(&self.channels),
+            InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
+            Arc::clone(&new_data),
+        );
 
-        self.state = ClientState::Running { runner, intern_recv, connection: None };
+        self.state = ClientState::Running { runner, intern_recv, connection: None, new_data };
     }
 
     pub fn disconnect(&mut self) {
@@ -75,6 +82,13 @@ impl Client {
             ClientState::Running { .. } => true,
         }
     }
+
+    pub fn wait_timeout(&self, duration: Duration) -> bool {
+        match &self.state {
+            ClientState::Disconnected => false,
+            ClientState::Running { new_data, .. } => new_data.wait_timeout(duration),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -89,6 +103,19 @@ enum InternEvent {
     Connected(Arc<ConnectionState>),
     Disconnected,
     Error(NetworkError),
+}
+
+#[derive(Clone)]
+struct InternEventSender {
+    intern_send: Sender<InternEvent>,
+    new_data: Arc<NewDataAvailable>,
+}
+
+impl InternEventSender {
+    fn send(&self, event: InternEvent) {
+        self.intern_send.send(event).ok();
+        self.new_data.notify();
+    }
 }
 
 enum RecvIterator<'a, T> {

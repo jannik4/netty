@@ -1,6 +1,7 @@
-use super::InternEvent;
+use super::{InternEvent, InternEventSender};
 use crate::{
     connection::ConnectionState,
+    new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
     transport::{ClientTransport, TransportError},
     ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError,
@@ -18,7 +19,8 @@ use std::{
 pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
     transport: T,
     channels: Arc<Channels>,
-    intern_events: Sender<InternEvent>,
+    intern_events: InternEventSender,
+    new_data: Arc<NewDataAvailable>,
 ) -> RunnerHandle {
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
@@ -30,7 +32,7 @@ pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
     Runner::run(Runner {
         is_alive: Arc::clone(&is_alive),
         transport,
-        connection: Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, &channels)),
+        connection: Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, new_data, &channels)),
         is_connected: AtomicBool::new(false),
         intern_events,
         tasks_recv,
@@ -83,7 +85,7 @@ struct Runner<T> {
     connection: Arc<ConnectionState>,
     is_connected: AtomicBool,
 
-    intern_events: Sender<InternEvent>,
+    intern_events: InternEventSender,
 
     tasks_recv: Receiver<RunnerTask>,
 }
@@ -139,8 +141,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                 TransportError::TimedOut => return,
                 TransportError::Internal(err) => {
                     self.intern_events
-                        .send(InternEvent::Error(NetworkError::TransportReceive(err)))
-                        .ok();
+                        .send(InternEvent::Error(NetworkError::TransportReceive(err)));
                     return;
                 }
             },
@@ -157,9 +158,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     match self.connection.decode_recv(channel_id, message) {
                         Some(Ok(())) => (),
                         Some(Err(err)) => {
-                            self.intern_events
-                                .send(InternEvent::Error(NetworkError::Decode(err)))
-                                .ok();
+                            self.intern_events.send(InternEvent::Error(NetworkError::Decode(err)));
                         }
                         None => {
                             // Ignore message on invalid channel
@@ -187,9 +186,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     // TODO: Store connection_idx and uuid for ProvideId
 
                     self.is_connected.store(true, Ordering::Relaxed);
-                    self.intern_events
-                        .send(InternEvent::Connected(Arc::clone(&self.connection)))
-                        .ok();
+                    self.intern_events.send(InternEvent::Connected(Arc::clone(&self.connection)));
                 }
                 Some(InternalS2C::Disconnect) => {
                     self.disconnect_and_stop(false);
@@ -233,11 +230,9 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                                             }
                                         }
                                         TransportError::Internal(err) => {
-                                            self.intern_events
-                                                .send(InternEvent::Error(
-                                                    NetworkError::TransportSend(err),
-                                                ))
-                                                .ok();
+                                            self.intern_events.send(InternEvent::Error(
+                                                NetworkError::TransportSend(err),
+                                            ));
 
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
@@ -273,7 +268,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
             let _ = self.transport.send(&InternalC2S::Disconnect.encode());
         }
 
-        self.intern_events.send(InternEvent::Disconnected).ok();
+        self.intern_events.send(InternEvent::Disconnected);
         self.is_alive.store(false, Ordering::Relaxed);
     }
 }

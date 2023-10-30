@@ -8,6 +8,7 @@ mod client;
 mod connection;
 mod double_key_map;
 mod handle;
+mod new_data;
 mod protocol;
 mod server;
 

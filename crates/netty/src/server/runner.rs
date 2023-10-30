@@ -1,9 +1,10 @@
-use super::InternEvent;
+use super::{InternEvent, InternEventSender};
 use crate::{
     channel::Channels,
     connection::ConnectionState,
     double_key_map::DoubleKeyMap,
     handle::{ConnectionIdx, TransportIdx},
+    new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
     transport::{ServerTransport, TransportError},
     ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError,
@@ -22,7 +23,8 @@ pub(super) fn start<T: ServerTransport + Send + Sync + 'static>(
     transport: T,
     transport_idx: TransportIdx,
     channels: Arc<Channels>,
-    intern_events: Sender<InternEvent>,
+    intern_events: InternEventSender,
+    new_data: Arc<NewDataAvailable>,
 ) -> RunnerHandle {
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
@@ -40,6 +42,7 @@ pub(super) fn start<T: ServerTransport + Send + Sync + 'static>(
         intern_events,
         channels,
         tasks_recv,
+        new_data,
     });
 
     RunnerHandle { is_alive, sender: tasks_send }
@@ -99,10 +102,12 @@ struct Runner<T: ServerTransport> {
 
     next_connection_idx: AtomicU32,
 
-    intern_events: Sender<InternEvent>,
+    intern_events: InternEventSender,
     channels: Arc<Channels>,
 
     tasks_recv: Receiver<RunnerTask>,
+
+    new_data: Arc<NewDataAvailable>,
 }
 
 impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
@@ -144,20 +149,17 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                         self.connections.write().unwrap().remove2(&id)
                     {
                         self.transport.cleanup(id);
-                        self.intern_events
-                            .send(InternEvent::Disconnected(ConnectionHandle {
-                                transport_idx: self.transport_idx,
-                                connection_idx,
-                            }))
-                            .ok();
+                        self.intern_events.send(InternEvent::Disconnected(ConnectionHandle {
+                            transport_idx: self.transport_idx,
+                            connection_idx,
+                        }));
                     }
                     return;
                 }
                 TransportError::TimedOut => return,
                 TransportError::Internal(err) => {
                     self.intern_events
-                        .send(InternEvent::Error(None, NetworkError::TransportReceive(err)))
-                        .ok();
+                        .send(InternEvent::Error(None, NetworkError::TransportReceive(err)));
                     return;
                 }
             },
@@ -176,15 +178,13 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                         match connection.decode_recv(channel_id, message) {
                             Some(Ok(())) => (),
                             Some(Err(err)) => {
-                                self.intern_events
-                                    .send(InternEvent::Error(
-                                        Some(ConnectionHandle {
-                                            transport_idx: self.transport_idx,
-                                            connection_idx: *connection_idx,
-                                        }),
-                                        NetworkError::Decode(err),
-                                    ))
-                                    .ok();
+                                self.intern_events.send(InternEvent::Error(
+                                    Some(ConnectionHandle {
+                                        transport_idx: self.transport_idx,
+                                        connection_idx: *connection_idx,
+                                    }),
+                                    NetworkError::Decode(err),
+                                ));
                             }
                             None => {
                                 // Ignore message on invalid channel
@@ -201,12 +201,12 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                                     self.connections.write().unwrap().remove2(&id)
                                 {
                                     self.transport.cleanup(id);
-                                    self.intern_events
-                                        .send(InternEvent::Disconnected(ConnectionHandle {
+                                    self.intern_events.send(InternEvent::Disconnected(
+                                        ConnectionHandle {
                                             transport_idx: self.transport_idx,
                                             connection_idx,
-                                        }))
-                                        .ok();
+                                        },
+                                    ));
                                 }
                             }
                             Some(InternalC2S::ProvideId(_, _)) => (), // Ignore
@@ -223,8 +223,11 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                         // Create a new connection
                         let connection_idx =
                             ConnectionIdx(self.next_connection_idx.fetch_add(1, Ordering::Relaxed));
-                        let connection =
-                            Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, &self.channels));
+                        let connection = Arc::new(ConnectionState::new(
+                            T::TRANSPORT_PROPERTIES,
+                            Arc::clone(&self.new_data),
+                            &self.channels,
+                        ));
                         let uuid = Uuid::new_v4();
                         self.connections.write().unwrap().insert(
                             connection_idx,
@@ -239,15 +242,10 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                             .send_to(&InternalS2C::Connect(connection_idx, uuid).encode(), id);
 
                         // Send connected event
-                        self.intern_events
-                            .send(InternEvent::Connected(
-                                ConnectionHandle {
-                                    transport_idx: self.transport_idx,
-                                    connection_idx,
-                                },
-                                connection,
-                            ))
-                            .ok();
+                        self.intern_events.send(InternEvent::Connected(
+                            ConnectionHandle { transport_idx: self.transport_idx, connection_idx },
+                            connection,
+                        ));
                     }
                     Some(InternalC2S::Disconnect) => (), // Ignore
                     Some(InternalC2S::ProvideId(client_connection_idx, client_uuid)) => {
@@ -311,14 +309,12 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                                                 .remove1(&connection_idx)
                                             {
                                                 self.transport.cleanup(id);
-                                                self.intern_events
-                                                    .send(InternEvent::Disconnected(
-                                                        ConnectionHandle {
-                                                            transport_idx: self.transport_idx,
-                                                            connection_idx,
-                                                        },
-                                                    ))
-                                                    .ok();
+                                                self.intern_events.send(InternEvent::Disconnected(
+                                                    ConnectionHandle {
+                                                        transport_idx: self.transport_idx,
+                                                        connection_idx,
+                                                    },
+                                                ));
                                             }
                                         }
                                         TransportError::TimedOut => {
@@ -328,15 +324,13 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                                             }
                                         }
                                         TransportError::Internal(err) => {
-                                            self.intern_events
-                                                .send(InternEvent::Error(
-                                                    Some(ConnectionHandle {
-                                                        transport_idx: self.transport_idx,
-                                                        connection_idx,
-                                                    }),
-                                                    NetworkError::TransportSend(err),
-                                                ))
-                                                .ok();
+                                            self.intern_events.send(InternEvent::Error(
+                                                Some(ConnectionHandle {
+                                                    transport_idx: self.transport_idx,
+                                                    connection_idx,
+                                                }),
+                                                NetworkError::TransportSend(err),
+                                            ));
 
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
@@ -376,7 +370,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
     }
 
     fn disconnect_self_and_stop(&self) {
-        self.intern_events.send(InternEvent::DisconnectedSelf).ok();
+        self.intern_events.send(InternEvent::DisconnectedSelf);
         self.is_alive.store(false, Ordering::Relaxed);
     }
 }

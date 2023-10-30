@@ -3,11 +3,11 @@ mod runner;
 use self::runner::RunnerHandle;
 use crate::{
     channel::Channels, connection::ConnectionState, handle::TransportIdx,
-    transport::ServerTransport, ConnectionHandle, NetworkDecode, NetworkEncode, NetworkError,
-    NetworkMessage,
+    new_data::NewDataAvailable, transport::ServerTransport, ConnectionHandle, NetworkDecode,
+    NetworkEncode, NetworkError, NetworkMessage,
 };
 use crossbeam_channel::{Receiver, Sender};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 enum ServerState {
     Disconnected,
@@ -18,6 +18,7 @@ struct ServerRunning {
     runners: Vec<RunnerHandle>,
     intern_recv: Receiver<InternEvent>,
     connections: HashMap<ConnectionHandle, Arc<ConnectionState>>,
+    new_data: Arc<NewDataAvailable>,
 }
 
 impl ServerRunning {
@@ -43,15 +44,18 @@ impl Server {
         self.stop();
 
         let (intern_send, intern_recv) = crossbeam_channel::unbounded();
+        let new_data = Arc::new(NewDataAvailable::new());
         let runners = transports.start(ServerTransportsParams {
             channels: Arc::clone(&self.channels),
-            intern_events: intern_send,
+            intern_events: InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
+            new_data: Arc::clone(&new_data),
         });
 
         self.state = ServerState::Running(ServerRunning {
             runners,
             intern_recv,
             connections: HashMap::new(),
+            new_data,
         });
     }
 
@@ -137,7 +141,14 @@ impl Server {
     pub fn is_running(&self) -> bool {
         match self.state {
             ServerState::Disconnected => false,
-            ServerState::Running { .. } => true,
+            ServerState::Running(_) => true,
+        }
+    }
+
+    pub fn wait_timeout(&self, duration: Duration) -> bool {
+        match &self.state {
+            ServerState::Disconnected => false,
+            ServerState::Running(running) => running.new_data.wait_timeout(duration),
         }
     }
 }
@@ -156,6 +167,19 @@ enum InternEvent {
     Disconnected(ConnectionHandle),
     DisconnectedSelf,
     Error(Option<ConnectionHandle>, NetworkError),
+}
+
+#[derive(Clone)]
+struct InternEventSender {
+    intern_send: Sender<InternEvent>,
+    new_data: Arc<NewDataAvailable>,
+}
+
+impl InternEventSender {
+    fn send(&self, event: InternEvent) {
+        self.intern_send.send(event).ok();
+        self.new_data.notify();
+    }
 }
 
 enum RecvIterator<'a, T> {
@@ -212,7 +236,8 @@ impl Iterator for ProcessEvents<'_> {
 
 pub struct ServerTransportsParams {
     channels: Arc<Channels>,
-    intern_events: Sender<InternEvent>,
+    intern_events: InternEventSender,
+    new_data: Arc<NewDataAvailable>,
 }
 
 pub trait ServerTransports {
@@ -224,7 +249,13 @@ where
     A: ServerTransport + Send + Sync + 'static,
 {
     fn start(self, params: ServerTransportsParams) -> Vec<RunnerHandle> {
-        vec![runner::start(self, TransportIdx(0), params.channels, params.intern_events)]
+        vec![runner::start(
+            self,
+            TransportIdx(0),
+            params.channels,
+            params.intern_events,
+            params.new_data,
+        )]
     }
 }
 
@@ -242,8 +273,15 @@ where
                 TransportIdx(0),
                 Arc::clone(&params.channels),
                 params.intern_events.clone(),
+                Arc::clone(&params.new_data),
             ),
-            runner::start(b, TransportIdx(1), params.channels, params.intern_events),
+            runner::start(
+                b,
+                TransportIdx(1),
+                params.channels,
+                params.intern_events,
+                params.new_data,
+            ),
         ]
     }
 }
