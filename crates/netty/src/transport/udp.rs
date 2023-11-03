@@ -2,7 +2,7 @@ use super::{ClientTransport, MaxPacketSize, ServerTransport, Transport, Transpor
 use std::{
     convert::Infallible,
     io::ErrorKind,
-    net::{SocketAddr, UdpSocket},
+    net::{SocketAddr, ToSocketAddrs, UdpSocket},
     time::Duration,
 };
 
@@ -12,7 +12,7 @@ pub struct UdpServerTransport {
 }
 
 impl UdpServerTransport {
-    pub fn bind(local_addr: SocketAddr) -> crate::Result<Self> {
+    pub fn bind<A: ToSocketAddrs>(local_addr: A) -> crate::Result<Self> {
         let socket = UdpSocket::bind(local_addr)?;
         socket.set_read_timeout(Some(Duration::from_secs(5)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -68,7 +68,10 @@ pub struct UdpClientTransport {
 }
 
 impl UdpClientTransport {
-    pub fn connect(local_addr: SocketAddr, remote_addr: SocketAddr) -> crate::Result<Self> {
+    pub fn connect<A: ToSocketAddrs, B: ToSocketAddrs>(
+        local_addr: A,
+        remote_addr: B,
+    ) -> crate::Result<Self> {
         let socket = UdpSocket::bind(local_addr)?;
         socket.connect(remote_addr)?;
         socket.set_read_timeout(Some(Duration::from_secs(5)))?;

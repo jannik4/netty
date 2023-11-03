@@ -1,4 +1,5 @@
 mod channel;
+mod tcp;
 mod udp;
 
 use std::{convert::Infallible, fmt::Debug, hash::Hash, ops::Deref, sync::Mutex};
@@ -6,6 +7,7 @@ use thiserror::Error;
 
 pub use self::{
     channel::{ChannelClientTransport, ChannelServerTransport},
+    tcp::{TcpClientTransport, TcpServerTransport},
     udp::{UdpClientTransport, UdpServerTransport},
 };
 
