@@ -150,7 +150,7 @@ impl ServerTransport for TcpServerTransport {
         buf: &mut [u8],
     ) -> Result<(usize, Self::ConnectionId), TransportError<Self::ConnectionId>> {
         // Receive
-        match self.receiver.recv_timeout(Duration::from_secs(5)) {
+        match self.receiver.recv_timeout(Duration::from_secs(1)) {
             Ok((addr, recv)) => match recv {
                 Ok(data) => {
                     buf[..data.len()].copy_from_slice(&data);
