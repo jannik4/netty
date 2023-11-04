@@ -14,6 +14,7 @@ use std::{
 };
 
 // TODO: Writes on one socket block all other sockets
+// TODO: It can take up to 1 second for the listener to shudown after calling disconnect
 
 #[derive(Debug)]
 pub struct TcpServerTransport {
