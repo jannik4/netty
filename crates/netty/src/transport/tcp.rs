@@ -72,8 +72,8 @@ impl TcpServerTransport {
 
             let setup = move || {
                 stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
 
                 Ok::<_, io::Error>((stream.try_clone()?, stream))
             };
