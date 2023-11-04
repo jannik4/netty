@@ -5,7 +5,10 @@ use std::{
     convert::Infallible,
     io::{self, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
     thread,
     time::Duration,
 };
@@ -14,12 +17,21 @@ use std::{
 
 #[derive(Debug)]
 pub struct TcpServerTransport {
+    is_alive: Arc<AtomicBool>,
     connections: Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
     receiver: Receiver<(SocketAddr, Result<Box<[u8]>, ()>)>,
 }
 
+impl Drop for TcpServerTransport {
+    fn drop(&mut self) {
+        self.is_alive.store(false, Ordering::Relaxed);
+    }
+}
+
 impl TcpServerTransport {
     pub fn bind<A: ToSocketAddrs>(local_addr: A) -> crate::Result<(SocketAddr, Self)> {
+        let is_alive = Arc::new(AtomicBool::new(true));
+
         let listener = TcpListener::bind(local_addr)?;
         let local_addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
@@ -27,19 +39,21 @@ impl TcpServerTransport {
         let (sender, receiver) = crossbeam_channel::unbounded();
 
         thread::spawn({
+            let is_alive = Arc::clone(&is_alive);
             let connections = Arc::clone(&connections);
-            move || Self::accept(listener, connections, sender)
+            move || Self::accept(is_alive, listener, connections, sender)
         });
 
-        Ok((local_addr, Self { connections, receiver }))
+        Ok((local_addr, Self { is_alive, connections, receiver }))
     }
 
     fn accept(
+        is_alive: Arc<AtomicBool>,
         listener: TcpListener,
         connections: Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
         sender: Sender<(SocketAddr, Result<Box<[u8]>, ()>)>,
     ) {
-        loop {
+        while is_alive.load(Ordering::Relaxed) {
             let (stream, addr) = match listener.accept() {
                 Ok((stream, addr)) => (stream, addr),
                 Err(e) => match e.kind() {
@@ -74,12 +88,15 @@ impl TcpServerTransport {
             connections.write().unwrap().insert(addr, stream_send);
 
             thread::spawn({
+                let is_alive = Arc::clone(&is_alive);
                 let mut stream = stream_recv;
                 let sender = sender.clone();
                 let connections = Arc::clone(&connections);
                 move || {
                     let mut buf = vec![0; Self::MAX_PACKET_SIZE.get()];
-                    while connections.read().unwrap().contains_key(&addr) {
+                    while is_alive.load(Ordering::Relaxed)
+                        && connections.read().unwrap().contains_key(&addr)
+                    {
                         match impl_recv(&mut stream, &mut buf) {
                             Ok(size) => {
                                 sender.send((addr, Ok(buf[0..size].into()))).ok();
