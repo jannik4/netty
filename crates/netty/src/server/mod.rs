@@ -125,6 +125,27 @@ impl Server {
         }
     }
 
+    pub fn broadcast_except<T: NetworkEncode + NetworkMessage + Send + Sync + 'static>(
+        &self,
+        message: T,
+        except: ConnectionHandle,
+    ) {
+        self.channels.assert_send_exists(T::CHANNEL_ID);
+        if let ServerState::Running(running) = &self.state {
+            let message: Arc<dyn NetworkEncode + Send + Sync> = Arc::new(message);
+            for handle in running.connections.keys() {
+                if *handle != except {
+                    running.runner(handle.transport_idx).send_to(
+                        Arc::clone(&message),
+                        handle.connection_idx,
+                        T::CHANNEL_ID,
+                        T::CHANNEL_CONFIG,
+                    );
+                }
+            }
+        }
+    }
+
     pub fn recv<T: NetworkDecode + NetworkMessage + 'static>(
         &self,
     ) -> impl Iterator<Item = (T, ConnectionHandle)> + '_ {
