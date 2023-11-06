@@ -242,7 +242,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                             .send_to(&InternalS2C::Connect(connection_idx, uuid).encode(), id);
 
                         // Send connected event
-                        self.intern_events.send(InternEvent::Connected(
+                        self.intern_events.send(InternEvent::IncomingConnection(
                             ConnectionHandle { transport_idx: self.transport_idx, connection_idx },
                             connection,
                         ));

@@ -7,7 +7,11 @@ use crate::{
     NetworkEncode, NetworkError, NetworkMessage,
 };
 use crossbeam_channel::{Receiver, Sender};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 enum ServerState {
     Disconnected,
@@ -15,14 +19,16 @@ enum ServerState {
 }
 
 struct ServerRunning {
-    runners: Vec<RunnerHandle>,
+    runners: Vec<Arc<RunnerHandle>>,
+    intern_send: InternEventSender,
     intern_recv: Receiver<InternEvent>,
     connections: HashMap<ConnectionHandle, Arc<ConnectionState>>,
+    incoming: HashMap<ConnectionHandle, Arc<ConnectionState>>,
     new_data: Arc<NewDataAvailable>,
 }
 
 impl ServerRunning {
-    fn runner(&self, transport_idx: TransportIdx) -> &RunnerHandle {
+    fn runner(&self, transport_idx: TransportIdx) -> &Arc<RunnerHandle> {
         self.runners
             .get(transport_idx.0 as usize)
             .unwrap_or_else(|| panic!("transport {} does not exist", transport_idx.0))
@@ -47,14 +53,22 @@ impl Server {
         let new_data = Arc::new(NewDataAvailable::new());
         let runners = transports.start(ServerTransportsParams {
             channels: Arc::clone(&self.channels),
-            intern_events: InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
+            intern_events: InternEventSender {
+                intern_send: intern_send.clone(),
+                new_data: Arc::clone(&new_data),
+            },
             new_data: Arc::clone(&new_data),
         });
 
         self.state = ServerState::Running(ServerRunning {
             runners,
+            intern_send: InternEventSender {
+                intern_send: intern_send.clone(),
+                new_data: Arc::clone(&new_data),
+            },
             intern_recv,
             connections: HashMap::new(),
+            incoming: HashMap::new(),
             new_data,
         });
     }
@@ -138,6 +152,20 @@ impl Server {
         }
     }
 
+    pub fn accept(&mut self, mut incoming: IncomingConnection) -> Option<ConnectionHandle> {
+        let ServerState::Running(running) = &mut self.state else { return None };
+
+        match running.incoming.remove(&incoming.handle) {
+            Some(connection) => {
+                incoming.disconnect_on_drop = None;
+                running.connections.insert(incoming.handle, connection);
+
+                Some(incoming.handle)
+            }
+            None => None,
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         match self.state {
             ServerState::Disconnected => false,
@@ -156,14 +184,36 @@ impl Server {
 #[derive(Debug)]
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::event::Event))]
 pub enum ServerEvent {
-    Connected(ConnectionHandle),
+    IncomingConnection(IncomingConnection),
     Disconnected(ConnectionHandle),
     DisconnectedSelf,
     Error(Option<ConnectionHandle>, NetworkError),
 }
 
+pub struct IncomingConnection {
+    handle: ConnectionHandle,
+    disconnect_on_drop: Option<(InternEventSender, Weak<RunnerHandle>)>,
+}
+
+impl Drop for IncomingConnection {
+    fn drop(&mut self) {
+        if let Some((intern, runner)) = &self.disconnect_on_drop {
+            intern.send(InternEvent::Disconnected(self.handle));
+            if let Some(runner) = runner.upgrade() {
+                runner.disconnect(self.handle.connection_idx, true);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for IncomingConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncomingConnection").field("handle", &self.handle).finish()
+    }
+}
+
 enum InternEvent {
-    Connected(ConnectionHandle, Arc<ConnectionState>),
+    IncomingConnection(ConnectionHandle, Arc<ConnectionState>),
     Disconnected(ConnectionHandle),
     DisconnectedSelf,
     Error(Option<ConnectionHandle>, NetworkError),
@@ -211,13 +261,21 @@ impl Iterator for ProcessEvents<'_> {
 
                 Some(loop {
                     match event {
-                        InternEvent::Connected(handle, connection) => {
-                            running.connections.insert(handle, connection);
-                            break ServerEvent::Connected(handle);
+                        InternEvent::IncomingConnection(handle, connection) => {
+                            running.incoming.insert(handle, connection);
+                            break ServerEvent::IncomingConnection(IncomingConnection {
+                                handle,
+                                disconnect_on_drop: Some((
+                                    running.intern_send.clone(),
+                                    Arc::downgrade(running.runner(handle.transport_idx)),
+                                )),
+                            });
                         }
                         InternEvent::Disconnected(handle) => {
                             if running.connections.remove(&handle).is_some() {
                                 break ServerEvent::Disconnected(handle);
+                            } else {
+                                running.incoming.remove(&handle);
                             }
                         }
                         InternEvent::DisconnectedSelf => {
@@ -241,21 +299,21 @@ pub struct ServerTransportsParams {
 }
 
 pub trait ServerTransports {
-    fn start(self, params: ServerTransportsParams) -> Vec<RunnerHandle>;
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>>;
 }
 
 impl<A> ServerTransports for A
 where
     A: ServerTransport + Send + Sync + 'static,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<RunnerHandle> {
-        vec![runner::start(
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+        vec![Arc::new(runner::start(
             self,
             TransportIdx(0),
             params.channels,
             params.intern_events,
             params.new_data,
-        )]
+        ))]
     }
 }
 
@@ -264,24 +322,24 @@ where
     A: ServerTransport + Send + Sync + 'static,
     B: ServerTransport + Send + Sync + 'static,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<RunnerHandle> {
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
         let (a, b) = self;
 
         vec![
-            runner::start(
+            Arc::new(runner::start(
                 a,
                 TransportIdx(0),
                 Arc::clone(&params.channels),
                 params.intern_events.clone(),
                 Arc::clone(&params.new_data),
-            ),
-            runner::start(
+            )),
+            Arc::new(runner::start(
                 b,
                 TransportIdx(1),
                 params.channels,
                 params.intern_events,
                 params.new_data,
-            ),
+            )),
         ]
     }
 }

@@ -52,8 +52,9 @@ fn run_simple(
     client.connect(client_transport);
     sleep(ms);
 
-    let client_handle = match server.process_events().next() {
-        Some(ServerEvent::Connected(handle)) => handle,
+    let server_event = server.process_events().next();
+    let client_handle = match server_event {
+        Some(ServerEvent::IncomingConnection(incoming)) => server.accept(incoming).unwrap(),
         event => panic!("unexpected event: {:?}", event),
     };
     assert!(server.process_events().next().is_none());
