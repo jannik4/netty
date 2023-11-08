@@ -16,6 +16,9 @@ pub struct ToClient<T>(pub T, pub ConnectionHandle);
 pub struct Broadcast<T>(pub T);
 
 #[derive(Debug, Event)]
+pub struct BroadcastExcept<T>(pub T, pub ConnectionHandle);
+
+#[derive(Debug, Event)]
 pub struct FromClient<T>(pub T, pub ConnectionHandle);
 
 #[derive(Resource, Clone)]
@@ -47,6 +50,7 @@ impl ServerChannelsBuilder<'_> {
     {
         self.0.add_event::<ToClient<T>>();
         self.0.add_event::<Broadcast<T>>();
+        self.0.add_event::<BroadcastExcept<T>>();
         self.0.add_systems(Last, handle_send::<T>);
 
         self.1.add_send::<T>();
@@ -103,6 +107,7 @@ fn handle_send<T>(
     server: Option<Res<Server>>,
     mut events_to_client: ResMut<Events<ToClient<T>>>,
     mut events_broadcast: ResMut<Events<Broadcast<T>>>,
+    mut events_broadcast_except: ResMut<Events<BroadcastExcept<T>>>,
 ) where
     T: NetworkEncode + NetworkMessage + Send + Sync + 'static,
 {
@@ -114,5 +119,8 @@ fn handle_send<T>(
     }
     for event in events_broadcast.drain() {
         server.broadcast(event.0);
+    }
+    for event in events_broadcast_except.drain() {
+        server.broadcast_except(event.0, event.1);
     }
 }
