@@ -14,5 +14,5 @@ serde = ["netty/serde"]
 [dependencies]
 netty = { path = "../netty", default-features = false, features = ["bevy"] }
 
-bevy_app = { version = "0.11.3", default-features = false }
-bevy_ecs = { version = "0.11.3", default-features = false }
+bevy_app = { version = "0.12.0", default-features = false }
+bevy_ecs = { version = "0.12.0", default-features = false }

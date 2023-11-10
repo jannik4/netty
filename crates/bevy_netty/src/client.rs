@@ -1,6 +1,6 @@
 use bevy_app::{App, First, Last};
 use bevy_ecs::{
-    event::{Event, EventWriter, Events},
+    event::{event_update_system, Event, EventWriter, Events},
     schedule::IntoSystemConfigs,
     system::{Res, ResMut, Resource},
 };
@@ -27,7 +27,7 @@ impl ClientChannelsBuilder<'_> {
         self.0.add_systems(
             First,
             handle_recv::<T>
-                .after(<Events<FromServer<T>>>::update_system)
+                .after(event_update_system::<FromServer<T>>)
                 .after(process_client_events),
         );
 
