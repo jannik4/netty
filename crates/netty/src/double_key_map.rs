@@ -46,13 +46,21 @@ impl<K1, K2, V> DoubleKeyMap<K1, K2, V> {
         let (k1, k2, v) = self.data.swap_remove(idx);
 
         // Remove the element from the other map
+        // This assert is essential to ensure that this fails loudly rather than causing
+        // UB later on, if the keys Eq/Hash impls are broken.
         assert_eq!(self.map2.remove(&k2).unwrap(), idx);
 
         // Update the index in the maps of the element that was swapped in
         if idx < self.data.len() {
             let (k1, k2, _) = &self.data[idx];
-            self.map1.insert(*k1, idx);
-            self.map2.insert(*k2, idx);
+
+            let map1_idx = self.map1.get_mut(k1).unwrap();
+            assert_eq!(*map1_idx, self.data.len()); // Essential, see above
+            *map1_idx = idx;
+
+            let map2_idx = self.map2.get_mut(k2).unwrap();
+            assert_eq!(*map1_idx, self.data.len()); // Essential, see above
+            *map2_idx = idx;
         }
 
         // Safety: k1 and k2 are removed from data/map1/map2 and were never exposed
@@ -75,13 +83,21 @@ impl<K1, K2, V> DoubleKeyMap<K1, K2, V> {
         let (k1, k2, v) = self.data.swap_remove(idx);
 
         // Remove the element from the other map
+        // This assert is essential to ensure that this fails loudly rather than causing
+        // UB later on, if the keys Eq/Hash impls are broken.
         assert_eq!(self.map1.remove(&k1).unwrap(), idx);
 
         // Update the index of the element that was swapped in
         if idx < self.data.len() {
             let (k1, k2, _) = &self.data[idx];
-            self.map1.insert(*k1, idx);
-            self.map2.insert(*k2, idx);
+
+            let map1_idx = self.map1.get_mut(k1).unwrap();
+            assert_eq!(*map1_idx, self.data.len()); // Essential, see above
+            *map1_idx = idx;
+
+            let map2_idx = self.map2.get_mut(k2).unwrap();
+            assert_eq!(*map1_idx, self.data.len()); // Essential, see above
+            *map2_idx = idx;
         }
 
         // Safety: k1 and k2 are removed from data/map1/map2 and were never exposed
@@ -127,11 +143,64 @@ impl<K1, K2, V> DoubleKeyMap<K1, K2, V> {
         let (k1, k2, v) = &mut self.data[idx];
         Some((&**k1, &**k2, v))
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K1, &K2, &V)> {
+        self.into_iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K1, &K2, &mut V)> {
+        self.into_iter()
+    }
 }
 
 impl<K1, K2, V> Default for DoubleKeyMap<K1, K2, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<'a, K1, K2, V> IntoIterator for &'a DoubleKeyMap<K1, K2, V> {
+    type Item = (&'a K1, &'a K2, &'a V);
+
+    // TODO: type IntoIter = impl Iterator<Item = Self::Item>;
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.data.iter().map(|(k1, k2, v)| (&**k1, &**k2, v)))
+    }
+}
+
+impl<'a, K1, K2, V> IntoIterator for &'a mut DoubleKeyMap<K1, K2, V> {
+    type Item = (&'a K1, &'a K2, &'a mut V);
+
+    // TODO: type IntoIter = impl Iterator<Item = Self::Item>;
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.data.iter_mut().map(|(k1, k2, v)| (&**k1, &**k2, v)))
+    }
+}
+
+impl<K1, K2, V> IntoIterator for DoubleKeyMap<K1, K2, V>
+// FIXME: Is the 'static bound really necessary?
+where
+    K1: 'static,
+    K2: 'static,
+    V: 'static,
+{
+    type Item = (K1, K2, V);
+
+    // TODO: type IntoIter = impl Iterator<Item = Self::Item>;
+    type IntoIter = Box<dyn Iterator<Item = Self::Item>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        drop(self.map1);
+        drop(self.map2);
+
+        Box::new(self.data.into_iter().map(|(k1, k2, v)| {
+            // SAFETY: We just dropped the maps, so the keys are no longer used elsewhere.
+            unsafe { (*Ptr::into_owned(k1), *Ptr::into_owned(k2), v) }
+        }))
     }
 }
 
