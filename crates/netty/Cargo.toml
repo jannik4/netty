@@ -18,7 +18,7 @@ crossbeam-channel = "0.5.8"
 bytes = "1.5.0"
 tinyvec = "1.6.0"
 uuid = { version = "1.5.0", features = ["v4"] }
-double_key_map = { git = "https://github.com/jannik4/double_key_map", rev = "1452e9fba5f44249e2a36e51ea369aafebfb2753" }
+double_key_map = { git = "https://github.com/jannik4/double_key_map", rev = "62c024635b2790c509af279c226f1d4c1417dd3f" }
 
 serde = { version = "1.0.188", optional = true }
 bincode = { version = "1.3.3", optional = true }
