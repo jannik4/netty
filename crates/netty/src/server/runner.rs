@@ -2,7 +2,6 @@ use super::{InternEvent, InternEventSender};
 use crate::{
     channel::Channels,
     connection::ConnectionState,
-    double_key_map::DoubleKeyMap,
     handle::{ConnectionIdx, TransportIdx},
     new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
@@ -10,6 +9,7 @@ use crate::{
     ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError,
 };
 use crossbeam_channel::{Receiver, Sender};
+use double_key_map::DoubleKeyMap;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},

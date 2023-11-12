@@ -252,6 +252,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "double_key_map"
+version = "0.1.0"
+source = "git+https://github.com/jannik4/double_key_map?rev=1452e9fba5f44249e2a36e51ea369aafebfb2753#1452e9fba5f44249e2a36e51ea369aafebfb2753"
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -398,6 +403,7 @@ dependencies = [
  "bincode",
  "bytes",
  "crossbeam-channel",
+ "double_key_map",
  "serde",
  "thiserror",
  "tinyvec",
