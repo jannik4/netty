@@ -254,7 +254,7 @@ dependencies = [
 [[package]]
 name = "double_key_map"
 version = "0.1.0"
-source = "git+https://github.com/jannik4/double_key_map?rev=b544680e1b715e54b5c0c3d2777f401696bf9264#b544680e1b715e54b5c0c3d2777f401696bf9264"
+source = "git+https://github.com/jannik4/double_key_map?rev=7df3155c1854b9941d70677f6450f7aa035ce9ac#7df3155c1854b9941d70677f6450f7aa035ce9ac"
 
 [[package]]
 name = "downcast-rs"
