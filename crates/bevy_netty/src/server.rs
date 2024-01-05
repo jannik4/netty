@@ -10,13 +10,11 @@ use netty::{
 use std::sync::Arc;
 
 #[derive(Debug, Event)]
-pub struct ToClient<T>(pub T, pub ConnectionHandle);
-
-#[derive(Debug, Event)]
-pub struct Broadcast<T>(pub T);
-
-#[derive(Debug, Event)]
-pub struct BroadcastExcept<T>(pub T, pub ConnectionHandle);
+pub enum ToClient<T> {
+    Single(T, ConnectionHandle),
+    Broadcast(T),
+    BroadcastExcept(T, ConnectionHandle),
+}
 
 #[derive(Debug, Event)]
 pub struct FromClient<T>(pub T, pub ConnectionHandle);
@@ -49,8 +47,6 @@ impl ServerChannelsBuilder<'_> {
         T: NetworkEncode + NetworkMessage + Send + Sync + 'static,
     {
         self.0.add_event::<ToClient<T>>();
-        self.0.add_event::<Broadcast<T>>();
-        self.0.add_event::<BroadcastExcept<T>>();
         self.0.add_systems(Last, handle_send::<T>);
 
         self.1.add_send::<T>();
@@ -103,24 +99,18 @@ where
     }
 }
 
-fn handle_send<T>(
-    server: Option<Res<Server>>,
-    mut events_to_client: ResMut<Events<ToClient<T>>>,
-    mut events_broadcast: ResMut<Events<Broadcast<T>>>,
-    mut events_broadcast_except: ResMut<Events<BroadcastExcept<T>>>,
-) where
+fn handle_send<T>(server: Option<Res<Server>>, mut events_to_client: ResMut<Events<ToClient<T>>>)
+where
     T: NetworkEncode + NetworkMessage + Send + Sync + 'static,
 {
     let Some(server) = server.as_ref() else {
         return;
     };
     for event in events_to_client.drain() {
-        server.send_to(event.0, event.1);
-    }
-    for event in events_broadcast.drain() {
-        server.broadcast(event.0);
-    }
-    for event in events_broadcast_except.drain() {
-        server.broadcast_except(event.0, event.1);
+        match event {
+            ToClient::Single(message, handle) => server.send_to(message, handle),
+            ToClient::Broadcast(message) => server.broadcast(message),
+            ToClient::BroadcastExcept(message, handle) => server.broadcast_except(message, handle),
+        }
     }
 }
