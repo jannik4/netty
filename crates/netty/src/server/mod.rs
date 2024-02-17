@@ -2,16 +2,19 @@ mod runner;
 
 use self::runner::RunnerHandle;
 use crate::{
-    channel::Channels, connection::ConnectionState, handle::TransportIdx,
-    new_data::NewDataAvailable, transport::ServerTransport, ConnectionHandle, NetworkDecode,
-    NetworkEncode, NetworkError, NetworkMessage,
+    channel::Channels,
+    connection::ConnectionState,
+    handle::TransportIdx,
+    new_data::NewDataAvailable,
+    transport::{AsyncTransport, ServerTransport},
+    ConnectionHandle, NetworkDecode, NetworkEncode, NetworkError, NetworkMessage, Runtime,
 };
-use crossbeam_channel::{Receiver, Sender};
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 enum ServerState {
     Disconnected,
@@ -21,7 +24,7 @@ enum ServerState {
 struct ServerRunning {
     runners: Vec<Arc<RunnerHandle>>,
     intern_send: InternEventSender,
-    intern_recv: Receiver<InternEvent>,
+    intern_recv: UnboundedReceiver<InternEvent>,
     connections: HashMap<ConnectionHandle, Arc<ConnectionState>>,
     incoming: HashMap<ConnectionHandle, Arc<ConnectionState>>,
     new_data: Arc<NewDataAvailable>,
@@ -46,10 +49,10 @@ impl Server {
         Self { channels, state: ServerState::Disconnected }
     }
 
-    pub fn start<T: ServerTransports>(&mut self, transports: T) {
+    pub fn start<T: ServerTransports<R>, R: Runtime>(&mut self, transports: T, runtime: Arc<R>) {
         self.stop();
 
-        let (intern_send, intern_recv) = crossbeam_channel::unbounded();
+        let (intern_send, intern_recv) = mpsc::unbounded_channel();
         let new_data = Arc::new(NewDataAvailable::new());
         let runners = transports.start(ServerTransportsParams {
             channels: Arc::clone(&self.channels),
@@ -58,6 +61,7 @@ impl Server {
                 new_data: Arc::clone(&new_data),
             },
             new_data: Arc::clone(&new_data),
+            runtime,
         });
 
         self.state = ServerState::Running(ServerRunning {
@@ -207,7 +211,7 @@ impl Server {
 pub enum ServerEvent {
     IncomingConnection(IncomingConnection),
     Disconnected(ConnectionHandle),
-    DisconnectedSelf,
+    DisconnectedSelf(Option<NetworkError>),
     Error(Option<ConnectionHandle>, NetworkError),
 }
 
@@ -236,13 +240,13 @@ impl std::fmt::Debug for IncomingConnection {
 enum InternEvent {
     IncomingConnection(ConnectionHandle, Arc<ConnectionState>),
     Disconnected(ConnectionHandle),
-    DisconnectedSelf,
+    DisconnectedSelf(Option<NetworkError>),
     Error(Option<ConnectionHandle>, NetworkError),
 }
 
 #[derive(Clone)]
 struct InternEventSender {
-    intern_send: Sender<InternEvent>,
+    intern_send: UnboundedSender<InternEvent>,
     new_data: Arc<NewDataAvailable>,
 }
 
@@ -255,16 +259,16 @@ impl InternEventSender {
 
 enum RecvIterator<'a, T> {
     NotConnected,
-    Receiver(&'a Receiver<T>),
+    Receiver(&'a Mutex<UnboundedReceiver<T>>),
 }
 
 impl<T> Iterator for RecvIterator<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
+        match &*self {
             Self::NotConnected => None,
-            Self::Receiver(recv) => recv.try_recv().ok(),
+            Self::Receiver(recv) => recv.lock().unwrap().try_recv().ok(),
         }
     }
 }
@@ -299,9 +303,9 @@ impl Iterator for ProcessEvents<'_> {
                                 running.incoming.remove(&handle);
                             }
                         }
-                        InternEvent::DisconnectedSelf => {
+                        InternEvent::DisconnectedSelf(error) => {
                             *self.0 = ServerState::Disconnected;
-                            break ServerEvent::DisconnectedSelf;
+                            break ServerEvent::DisconnectedSelf(error);
                         }
                         InternEvent::Error(handle, error) => {
                             break ServerEvent::Error(handle, error);
@@ -313,23 +317,27 @@ impl Iterator for ProcessEvents<'_> {
     }
 }
 
-pub struct ServerTransportsParams {
+pub struct ServerTransportsParams<R> {
     channels: Arc<Channels>,
     intern_events: InternEventSender,
     new_data: Arc<NewDataAvailable>,
+    runtime: Arc<R>,
 }
 
-pub trait ServerTransports {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>>;
+pub trait ServerTransports<R> {
+    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>>;
 }
 
-impl<A> ServerTransports for A
+impl<A, R> ServerTransports<R> for AsyncTransport<A, R>
 where
     A: ServerTransport + Send + Sync + 'static,
+    R: Runtime,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>> {
+        let a = self;
         vec![Arc::new(runner::start(
-            self,
+            a,
+            params.runtime,
             TransportIdx(0),
             params.channels,
             params.intern_events,
@@ -338,17 +346,18 @@ where
     }
 }
 
-impl<A, B> ServerTransports for (A, B)
+impl<A, B, R> ServerTransports<R> for (AsyncTransport<A, R>, AsyncTransport<B, R>)
 where
     A: ServerTransport + Send + Sync + 'static,
     B: ServerTransport + Send + Sync + 'static,
+    R: Runtime,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>> {
         let (a, b) = self;
-
         vec![
             Arc::new(runner::start(
                 a,
+                Arc::clone(&params.runtime),
                 TransportIdx(0),
                 Arc::clone(&params.channels),
                 params.intern_events.clone(),
@@ -356,6 +365,7 @@ where
             )),
             Arc::new(runner::start(
                 b,
+                params.runtime,
                 TransportIdx(1),
                 params.channels,
                 params.intern_events,

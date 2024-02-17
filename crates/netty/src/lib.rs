@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-// TODO: bound crossbeam channels capacity
+// TODO: bound channels capacity
 
 mod channel;
 mod channel_id;
@@ -13,6 +13,7 @@ mod server;
 
 pub mod transport;
 
+use std::{future::Future, time::Duration};
 use thiserror::Error;
 
 pub use {
@@ -112,3 +113,66 @@ struct Channel {
     ty: std::any::TypeId,
     ty_name: &'static str,
 }
+
+pub trait Runtime: native_only_tokio::NativeOnlyTokio + Send + Sync + 'static {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + WasmNotSend + 'static;
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend;
+}
+
+mod native_only_tokio {
+    pub trait NativeOnlyTokio {}
+
+    #[cfg(target_arch = "wasm32")]
+    impl<T> NativeOnlyTokio for T {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl NativeOnlyTokio for super::NativeRuntime {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl NativeOnlyTokio for &'static super::NativeRuntime {}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct NativeRuntime(pub tokio::runtime::Runtime);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime for NativeRuntime {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + WasmNotSend + 'static,
+    {
+        self.0.spawn(f);
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend {
+        tokio::time::sleep(duration)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime for &'static NativeRuntime {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + WasmNotSend + 'static,
+    {
+        (*self).spawn(f);
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend {
+        (*self).sleep(duration)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait WasmNotSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> WasmNotSend for T {}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub trait WasmNotSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> WasmNotSend for T {}

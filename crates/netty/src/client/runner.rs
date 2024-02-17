@@ -3,39 +3,66 @@ use crate::{
     connection::ConnectionState,
     new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
-    transport::{ClientTransport, TransportError},
-    ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError,
+    transport::{AsyncTransport, ClientTransport, TransportError},
+    ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError, Runtime,
 };
-use crossbeam_channel::{Receiver, Sender};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    thread,
     time::Duration,
 };
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    Mutex,
+};
 
-pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
-    transport: T,
+pub(super) fn start<T, R>(
+    transport: AsyncTransport<T, R>,
+    runtime: Arc<R>,
     channels: Arc<Channels>,
     intern_events: InternEventSender,
     new_data: Arc<NewDataAvailable>,
-) -> RunnerHandle {
+) -> RunnerHandle
+where
+    T: ClientTransport + Send + Sync + 'static,
+    R: Runtime,
+{
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
     assert!(T::IS_RELIABLE);
 
     let is_alive = Arc::new(AtomicBool::new(true));
-    let (tasks_send, tasks_recv) = crossbeam_channel::unbounded();
+    let (tasks_send, tasks_recv) = mpsc::unbounded_channel();
 
-    Runner::run(Runner {
-        is_alive: Arc::clone(&is_alive),
-        transport,
-        connection: Arc::new(ConnectionState::new(T::TRANSPORT_PROPERTIES, new_data, &channels)),
-        is_connected: AtomicBool::new(false),
-        intern_events,
-        tasks_recv,
+    runtime.spawn({
+        let is_alive = Arc::clone(&is_alive);
+        let runtime = Arc::clone(&runtime);
+        async move {
+            match transport.start(Arc::clone(&runtime)).await {
+                Ok(transport) => {
+                    Runner::run(Runner {
+                        is_alive,
+                        transport,
+                        connection: Arc::new(ConnectionState::new(
+                            T::TRANSPORT_PROPERTIES,
+                            new_data,
+                            &channels,
+                        )),
+                        is_connected: AtomicBool::new(false),
+                        intern_events,
+                        channels,
+                        tasks_recv: Mutex::new(tasks_recv),
+                        runtime,
+                    });
+                }
+                Err(err) => {
+                    intern_events.send(InternEvent::Disconnected(Some(err)));
+                    is_alive.store(false, Ordering::Relaxed);
+                }
+            }
+        }
     });
 
     RunnerHandle { is_alive, sender: tasks_send }
@@ -43,7 +70,7 @@ pub(super) fn start<T: ClientTransport + Send + Sync + 'static>(
 
 pub struct RunnerHandle {
     is_alive: Arc<AtomicBool>,
-    sender: Sender<RunnerTask>,
+    sender: UnboundedSender<RunnerTask>,
 }
 
 impl RunnerHandle {
@@ -78,7 +105,7 @@ enum RunnerTask {
     },
 }
 
-struct Runner<T> {
+struct Runner<T, R> {
     is_alive: Arc<AtomicBool>,
 
     transport: T,
@@ -86,55 +113,58 @@ struct Runner<T> {
     is_connected: AtomicBool,
 
     intern_events: InternEventSender,
+    channels: Arc<Channels>,
 
-    tasks_recv: Receiver<RunnerTask>,
+    tasks_recv: Mutex<UnboundedReceiver<RunnerTask>>,
+
+    runtime: Arc<R>,
 }
 
-impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
+impl<T: ClientTransport + Send + Sync + 'static, R: Runtime> Runner<T, R> {
     fn run(self) {
         let this = Arc::new(self);
 
         // Send connect message to server
-        thread::spawn({
+        this.runtime.spawn({
             let this = Arc::clone(&this);
-            move || {
+            async move {
                 while this.is_alive.load(Ordering::Relaxed)
                     && !this.is_connected.load(Ordering::Relaxed)
                 {
-                    let _ = this.transport.send(&InternalC2S::Connect.encode());
-                    thread::sleep(Duration::from_millis(500));
+                    let _ = this.transport.send(&InternalC2S::Connect.encode()).await;
+                    this.runtime.sleep(Duration::from_millis(500)).await;
                 }
             }
         });
 
         // Tick recv
-        thread::spawn({
+        this.runtime.spawn({
             let this = Arc::clone(&this);
-            move || {
+            async move {
                 let mut buf = vec![0; T::MAX_PACKET_SIZE.get()]; // TODO: array or vec?
                 while this.is_alive.load(Ordering::Relaxed) {
-                    this.tick_recv(&mut buf);
+                    this.tick_recv(&mut buf).await;
                 }
             }
         });
 
         // Tick tasks
-        thread::spawn({
+        this.runtime.spawn({
             let this = Arc::clone(&this);
-            move || {
+            async move {
                 while this.is_alive.load(Ordering::Relaxed) {
-                    this.tick_tasks();
+                    this.tick_tasks().await;
                 }
             }
         });
     }
 
-    fn tick_recv(&self, buf: &mut [u8]) {
-        let buf = match self.transport.recv(buf) {
+    async fn tick_recv(&self, buf: &mut [u8]) {
+        let buf = match self.transport.recv(buf).await {
             Ok(size) => &buf[..size],
             Err(err) => match err {
                 TransportError::Disconnected => {
-                    self.disconnect_and_stop(false);
+                    self.disconnect_and_stop(false, None).await; // TODO: error = Some("transport disconnected ...")
                     return;
                 }
                 TransportError::RemoteDisconnected(never) => match never {},
@@ -158,7 +188,20 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     match self.connection.decode_recv(channel_id, message) {
                         Some(Ok(())) => (),
                         Some(Err(err)) => {
-                            self.intern_events.send(InternEvent::Error(NetworkError::Decode(err)));
+                            // If the transport layer is reliable and the channel is reliable, disconnect
+                            // since the message is lost permanently
+                            if T::IS_RELIABLE
+                                && self
+                                    .channels
+                                    .recv
+                                    .get(&channel_id)
+                                    .map_or(false, |channel| channel.0.config.reliable)
+                            {
+                                self.disconnect_and_stop(false, Some(err.into())).await;
+                            } else {
+                                self.intern_events
+                                    .send(InternEvent::Error(NetworkError::Decode(err)));
+                            }
                         }
                         None => {
                             // Ignore message on invalid channel
@@ -170,7 +213,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     match InternalS2C::decode(buf) {
                         Some(InternalS2C::Connect(_, _)) => (), // Ignore
                         Some(InternalS2C::Disconnect) => {
-                            self.disconnect_and_stop(false);
+                            self.disconnect_and_stop(false, None).await;
                         }
                         Some(InternalS2C::RequestId) => {
                             // TODO: Send server [ProvideId + connection_idx + uuid]
@@ -189,7 +232,7 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                     self.intern_events.send(InternEvent::Connected(Arc::clone(&self.connection)));
                 }
                 Some(InternalS2C::Disconnect) => {
-                    self.disconnect_and_stop(false);
+                    self.disconnect_and_stop(false, None).await;
                 }
                 Some(InternalS2C::RequestId) => (), // Ignore
                 None => (),                         // Ignore
@@ -197,15 +240,15 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
         }
     }
 
-    fn tick_tasks(&self) {
-        match self.tasks_recv.recv() {
-            Ok(RunnerTask::Send { message, channel_id, channel_config }) => {
+    async fn tick_tasks(&self) {
+        match self.tasks_recv.lock().await.recv().await {
+            Some(RunnerTask::Send { message, channel_id, channel_config }) => {
                 if self.is_connected.load(Ordering::Relaxed) {
                     match message.encode() {
                         Ok(payload) => {
                             if payload.len() > protocol::max_payload_size::<T>() {
                                 // TODO: Split payload into multiple packets instead of disconnecting
-                                self.disconnect_and_stop(false);
+                                self.disconnect_and_stop(false, None).await;
                                 return;
                             }
 
@@ -215,18 +258,18 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
                             buf.extend_from_slice(&payload);
 
                             //
-                            match self.transport.send(&buf) {
+                            match self.transport.send(&buf).await {
                                 Ok(()) => (),
                                 Err(err) => {
                                     match err {
                                         TransportError::Disconnected => {
-                                            self.disconnect_and_stop(false);
+                                            self.disconnect_and_stop(false, None).await;
                                         }
                                         TransportError::RemoteDisconnected(never) => match never {},
                                         TransportError::TimedOut => {
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
-                                                self.disconnect_and_stop(false);
+                                                self.disconnect_and_stop(false, None).await;
                                             }
                                         }
                                         TransportError::Internal(err) => {
@@ -236,39 +279,40 @@ impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
 
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
-                                                self.disconnect_and_stop(false);
+                                                self.disconnect_and_stop(false, None).await;
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        Err(_err) => {
+                        Err(err) => {
                             // Encoding should never fail, disconnect
-                            // TODO: Provide encode error to user
-                            self.disconnect_and_stop(true);
+                            self.disconnect_and_stop(true, Some(err.into())).await;
                         }
                     }
                 } else {
                     // TODO: Store reliable messages and send them when connected instead of disconnecting
-                    self.disconnect_and_stop(false);
+                    self.disconnect_and_stop(false, None).await;
                 }
             }
-            Ok(RunnerTask::Disconnect { notify_server }) => self.disconnect_and_stop(notify_server),
-            Err(_) => {
+            Some(RunnerTask::Disconnect { notify_server }) => {
+                self.disconnect_and_stop(notify_server, None).await;
+            }
+            None => {
                 // runner handle was dropped
                 self.is_alive.store(false, Ordering::Relaxed);
             }
         }
     }
 
-    fn disconnect_and_stop(&self, notify_server: bool) {
+    async fn disconnect_and_stop(&self, notify_server: bool, error: Option<NetworkError>) {
         if notify_server {
             // Send disconnect message to server
-            let _ = self.transport.send(&InternalC2S::Disconnect.encode());
+            let _ = self.transport.send(&InternalC2S::Disconnect.encode()).await;
         }
 
-        self.intern_events.send(InternEvent::Disconnected);
+        self.intern_events.send(InternEvent::Disconnected(error));
         self.is_alive.store(false, Ordering::Relaxed);
     }
 }

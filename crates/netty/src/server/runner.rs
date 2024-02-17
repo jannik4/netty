@@ -5,44 +5,64 @@ use crate::{
     handle::{ConnectionIdx, TransportIdx},
     new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
-    transport::{ServerTransport, TransportError},
-    ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError,
+    transport::{AsyncTransport, ServerTransport, TransportError},
+    ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError, Runtime,
 };
-use crossbeam_channel::{Receiver, Sender};
 use double_key_map::DoubleKeyMap;
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, RwLock,
-    },
-    thread,
+use std::sync::{
+    atomic::{AtomicBool, AtomicU32, Ordering},
+    Arc,
+};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    Mutex, RwLock,
 };
 use uuid::Uuid;
 
-pub(super) fn start<T: ServerTransport + Send + Sync + 'static>(
-    transport: T,
+pub(super) fn start<T, R>(
+    transport: AsyncTransport<T, R>,
+    runtime: Arc<R>,
     transport_idx: TransportIdx,
     channels: Arc<Channels>,
     intern_events: InternEventSender,
     new_data: Arc<NewDataAvailable>,
-) -> RunnerHandle {
+) -> RunnerHandle
+where
+    T: ServerTransport + Send + Sync + 'static,
+    R: Runtime,
+{
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
     assert!(T::IS_RELIABLE);
 
     let is_alive = Arc::new(AtomicBool::new(true));
-    let (tasks_send, tasks_recv) = crossbeam_channel::unbounded();
+    let (tasks_send, tasks_recv) = mpsc::unbounded_channel();
 
-    Runner::run(Runner {
-        is_alive: Arc::clone(&is_alive),
-        transport,
-        transport_idx,
-        connections: RwLock::new(DoubleKeyMap::new()),
-        next_connection_idx: AtomicU32::new(0),
-        intern_events,
-        channels,
-        tasks_recv,
-        new_data,
+    runtime.spawn({
+        let is_alive = Arc::clone(&is_alive);
+        let runtime = Arc::clone(&runtime);
+        async move {
+            match transport.start(Arc::clone(&runtime)).await {
+                Ok(transport) => {
+                    Runner::run(Runner {
+                        is_alive,
+                        transport,
+                        transport_idx,
+                        connections: RwLock::new(DoubleKeyMap::new()),
+                        next_connection_idx: AtomicU32::new(0),
+                        intern_events,
+                        channels,
+                        tasks_recv: Mutex::new(tasks_recv),
+                        new_data,
+                        runtime,
+                    });
+                }
+                Err(err) => {
+                    intern_events.send(InternEvent::DisconnectedSelf(Some(err)));
+                    is_alive.store(false, Ordering::Relaxed);
+                }
+            }
+        }
     });
 
     RunnerHandle { is_alive, sender: tasks_send }
@@ -50,7 +70,7 @@ pub(super) fn start<T: ServerTransport + Send + Sync + 'static>(
 
 pub struct RunnerHandle {
     is_alive: Arc<AtomicBool>,
-    sender: Sender<RunnerTask>,
+    sender: UnboundedSender<RunnerTask>,
 }
 
 impl RunnerHandle {
@@ -93,7 +113,7 @@ enum RunnerTask {
     },
 }
 
-struct Runner<T: ServerTransport> {
+struct Runner<T: ServerTransport, R> {
     is_alive: Arc<AtomicBool>,
 
     transport: T,
@@ -105,50 +125,52 @@ struct Runner<T: ServerTransport> {
     intern_events: InternEventSender,
     channels: Arc<Channels>,
 
-    tasks_recv: Receiver<RunnerTask>,
+    tasks_recv: Mutex<UnboundedReceiver<RunnerTask>>,
 
     new_data: Arc<NewDataAvailable>,
+
+    runtime: Arc<R>,
 }
 
-impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
+impl<T: ServerTransport + Send + Sync + 'static, R: Runtime> Runner<T, R> {
     fn run(self) {
         let this = Arc::new(self);
 
         // Tick recv
-        thread::spawn({
+        this.runtime.spawn({
             let this = Arc::clone(&this);
-            move || {
+            async move {
                 let mut buf = vec![0; T::MAX_PACKET_SIZE.get()]; // TODO: array or vec?
                 while this.is_alive.load(Ordering::Relaxed) {
-                    this.tick_recv(&mut buf);
+                    this.tick_recv(&mut buf).await;
                 }
             }
         });
 
         // Tick tasks
-        thread::spawn({
+        this.runtime.spawn({
             let this = Arc::clone(&this);
-            move || {
+            async move {
                 while this.is_alive.load(Ordering::Relaxed) {
-                    this.tick_tasks();
+                    this.tick_tasks().await;
                 }
             }
         });
     }
 
-    fn tick_recv(&self, buf: &mut [u8]) {
-        let (buf, id) = match self.transport.recv_from(buf) {
+    async fn tick_recv(&self, buf: &mut [u8]) {
+        let (buf, id) = match self.transport.recv_from(buf).await {
             Ok((size, id)) => (&buf[..size], id),
             Err(err) => match err {
                 TransportError::Disconnected => {
-                    self.disconnect_self_and_stop();
+                    self.disconnect_self_and_stop(None); // TODO: error = Some("transport disconnected ...")
                     return;
                 }
                 TransportError::RemoteDisconnected(id) => {
                     if let Some((connection_idx, _, _)) =
-                        self.connections.write().unwrap().remove2(&id)
+                        self.connections.write().await.remove2(&id)
                     {
-                        self.transport.cleanup(id);
+                        self.transport.cleanup(id).await;
                         self.intern_events.send(InternEvent::Disconnected(ConnectionHandle {
                             transport_idx: self.transport_idx,
                             connection_idx,
@@ -169,7 +191,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
             return; // Ignore empty message
         }
 
-        let connections_lock = self.connections.read().unwrap();
+        let connections_lock = self.connections.read().await;
         match connections_lock.get2(&id) {
             Some((connection_idx, _, (_, connection))) => {
                 match ChannelId::try_new(buf[0]) {
@@ -178,13 +200,31 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                         match connection.decode_recv(channel_id, message) {
                             Some(Ok(())) => (),
                             Some(Err(err)) => {
-                                self.intern_events.send(InternEvent::Error(
-                                    Some(ConnectionHandle {
-                                        transport_idx: self.transport_idx,
-                                        connection_idx: *connection_idx,
-                                    }),
-                                    NetworkError::Decode(err),
-                                ));
+                                // If the transport layer is reliable and the channel is reliable, disconnect
+                                // since the message is lost permanently
+                                if T::IS_RELIABLE
+                                    && self
+                                        .channels
+                                        .recv
+                                        .get(&channel_id)
+                                        .map_or(false, |channel| channel.0.config.reliable)
+                                {
+                                    self.transport.cleanup(id).await;
+                                    self.intern_events.send(InternEvent::Disconnected(
+                                        ConnectionHandle {
+                                            transport_idx: self.transport_idx,
+                                            connection_idx: *connection_idx,
+                                        },
+                                    ));
+                                } else {
+                                    self.intern_events.send(InternEvent::Error(
+                                        Some(ConnectionHandle {
+                                            transport_idx: self.transport_idx,
+                                            connection_idx: *connection_idx,
+                                        }),
+                                        NetworkError::Decode(err),
+                                    ));
+                                }
                             }
                             None => {
                                 // Ignore message on invalid channel
@@ -198,9 +238,9 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                             Some(InternalC2S::Connect) => (), // Ignore
                             Some(InternalC2S::Disconnect) => {
                                 if let Some((connection_idx, _, _)) =
-                                    self.connections.write().unwrap().remove2(&id)
+                                    self.connections.write().await.remove2(&id)
                                 {
-                                    self.transport.cleanup(id);
+                                    self.transport.cleanup(id).await;
                                     self.intern_events.send(InternEvent::Disconnected(
                                         ConnectionHandle {
                                             transport_idx: self.transport_idx,
@@ -229,7 +269,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                             &self.channels,
                         ));
                         let uuid = Uuid::new_v4();
-                        self.connections.write().unwrap().insert(
+                        self.connections.write().await.insert(
                             connection_idx,
                             id,
                             (uuid, Arc::clone(&connection)),
@@ -239,7 +279,8 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                         // TODO: Send message reliably
                         let _ = self
                             .transport
-                            .send_to(&InternalS2C::Connect(connection_idx, uuid).encode(), id);
+                            .send_to(&InternalS2C::Connect(connection_idx, uuid).encode(), id)
+                            .await;
 
                         // Send connected event
                         self.intern_events.send(InternEvent::IncomingConnection(
@@ -250,11 +291,11 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                     Some(InternalC2S::Disconnect) => (), // Ignore
                     Some(InternalC2S::ProvideId(client_connection_idx, client_uuid)) => {
                         if let Some((connection_idx, current_id, (uuid, connection))) =
-                            self.connections.read().unwrap().get1(&client_connection_idx)
+                            self.connections.read().await.get1(&client_connection_idx)
                         {
                             if *current_id != id && *uuid == client_uuid {
                                 // Client provided the correct connection_idx/uuid: update the connection id
-                                self.connections.write().unwrap().insert(
+                                self.connections.write().await.insert(
                                     *connection_idx,
                                     id,
                                     (*uuid, Arc::clone(connection)),
@@ -265,7 +306,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                     None => {
                         // This might be a message from a connected client, which has a new connection id.
                         // Request the new connection id from the client.
-                        let _ = self.transport.send_to(&InternalS2C::RequestId.encode(), id);
+                        let _ = self.transport.send_to(&InternalS2C::RequestId.encode(), id).await;
                         // TODO: Only send above once every 500ms or so
                     }
                 }
@@ -273,16 +314,16 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
         }
     }
 
-    fn tick_tasks(&self) {
-        match self.tasks_recv.recv() {
-            Ok(RunnerTask::SendTo { message, connection_idx, channel_id, channel_config }) => {
-                let connections_lock = self.connections.read().unwrap();
+    async fn tick_tasks(&self) {
+        match self.tasks_recv.lock().await.recv().await {
+            Some(RunnerTask::SendTo { message, connection_idx, channel_id, channel_config }) => {
+                let connections_lock = self.connections.read().await;
                 if let Some((_, id, _)) = connections_lock.get1(&connection_idx) {
                     match message.encode() {
                         Ok(payload) => {
                             if payload.len() > protocol::max_payload_size::<T>() {
                                 // TODO: Split payload into multiple packets instead of disconnecting
-                                self.disconnect_self_and_stop();
+                                self.disconnect_self_and_stop(None);
                                 return;
                             }
 
@@ -292,12 +333,12 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                             buf.extend_from_slice(&payload);
 
                             //
-                            match self.transport.send_to(&buf, *id) {
+                            match self.transport.send_to(&buf, *id).await {
                                 Ok(()) => (),
                                 Err(err) => {
                                     match err {
                                         TransportError::Disconnected => {
-                                            self.disconnect_self_and_stop();
+                                            self.disconnect_self_and_stop(None);
                                         }
                                         TransportError::RemoteDisconnected(()) => {
                                             drop(connections_lock);
@@ -305,10 +346,10 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                                             if let Some((connection_idx, id, _)) = self
                                                 .connections
                                                 .write()
-                                                .unwrap()
+                                                .await
                                                 .remove1(&connection_idx)
                                             {
-                                                self.transport.cleanup(id);
+                                                self.transport.cleanup(id).await;
                                                 self.intern_events.send(InternEvent::Disconnected(
                                                     ConnectionHandle {
                                                         transport_idx: self.transport_idx,
@@ -320,7 +361,7 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                                         TransportError::TimedOut => {
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
-                                                self.disconnect_self_and_stop();
+                                                self.disconnect_self_and_stop(None);
                                             }
                                         }
                                         TransportError::Internal(err) => {
@@ -334,43 +375,41 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
 
                                             if channel_config.reliable {
                                                 // TODO: Retry instead of disconnecting
-                                                self.disconnect_self_and_stop();
+                                                self.disconnect_self_and_stop(None);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        Err(_err) => {
+                        Err(err) => {
                             // Encoding should never fail, disconnect
-                            // TODO: Provide encode error to user
                             // TODO: Only disconnect from this connection, not the whole server
-                            self.disconnect_self_and_stop();
+                            self.disconnect_self_and_stop(Some(err.into()));
                         }
                     }
                 }
             }
-            Ok(RunnerTask::Disconnect { connection_idx, notify_client }) => {
-                if let Some((_, id, _)) = self.connections.write().unwrap().remove1(&connection_idx)
-                {
+            Some(RunnerTask::Disconnect { connection_idx, notify_client }) => {
+                if let Some((_, id, _)) = self.connections.write().await.remove1(&connection_idx) {
                     if notify_client {
                         // Send disconnect message to client
-                        let _ = self.transport.send_to(&InternalS2C::Disconnect.encode(), id);
+                        let _ = self.transport.send_to(&InternalS2C::Disconnect.encode(), id).await;
                     }
 
                     // Cleanup connection
-                    self.transport.cleanup(id);
+                    self.transport.cleanup(id).await;
                 }
             }
-            Err(_) => {
+            None => {
                 // runner handle was dropped
                 self.is_alive.store(false, Ordering::Relaxed);
             }
         }
     }
 
-    fn disconnect_self_and_stop(&self) {
-        self.intern_events.send(InternEvent::DisconnectedSelf);
+    fn disconnect_self_and_stop(&self, error: Option<NetworkError>) {
+        self.intern_events.send(InternEvent::DisconnectedSelf(error));
         self.is_alive.store(false, Ordering::Relaxed);
     }
 }

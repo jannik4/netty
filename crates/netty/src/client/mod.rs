@@ -2,17 +2,23 @@ mod runner;
 
 use self::runner::RunnerHandle;
 use crate::{
-    channel::Channels, connection::ConnectionState, new_data::NewDataAvailable,
-    transport::ClientTransport, NetworkDecode, NetworkEncode, NetworkError, NetworkMessage,
+    channel::Channels,
+    connection::ConnectionState,
+    new_data::NewDataAvailable,
+    transport::{AsyncTransport, ClientTransport},
+    NetworkDecode, NetworkEncode, NetworkError, NetworkMessage, Runtime,
 };
-use crossbeam_channel::{Receiver, Sender};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 enum ClientState {
     Disconnected,
     Running {
         runner: RunnerHandle,
-        intern_recv: Receiver<InternEvent>,
+        intern_recv: UnboundedReceiver<InternEvent>,
         connection: Option<Arc<ConnectionState>>,
         new_data: Arc<NewDataAvailable>,
     },
@@ -29,14 +35,19 @@ impl Client {
         Self { channels, state: ClientState::Disconnected }
     }
 
-    pub fn connect<T: ClientTransport + Send + Sync + 'static>(&mut self, transport: T) {
+    pub fn connect<T, R>(&mut self, transport: AsyncTransport<T, R>, runtime: Arc<R>)
+    where
+        T: ClientTransport + Send + Sync + 'static,
+        R: Runtime,
+    {
         self.disconnect();
 
-        let (intern_send, intern_recv) = crossbeam_channel::unbounded();
+        let (intern_send, intern_recv) = mpsc::unbounded_channel();
         let new_data = Arc::new(NewDataAvailable::new());
 
         let runner = runner::start(
             transport,
+            runtime,
             Arc::clone(&self.channels),
             InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
             Arc::clone(&new_data),
@@ -95,19 +106,19 @@ impl Client {
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::event::Event))]
 pub enum ClientEvent {
     Connected,
-    Disconnected,
+    Disconnected(Option<NetworkError>),
     Error(NetworkError),
 }
 
 enum InternEvent {
     Connected(Arc<ConnectionState>),
-    Disconnected,
+    Disconnected(Option<NetworkError>),
     Error(NetworkError),
 }
 
 #[derive(Clone)]
 struct InternEventSender {
-    intern_send: Sender<InternEvent>,
+    intern_send: UnboundedSender<InternEvent>,
     new_data: Arc<NewDataAvailable>,
 }
 
@@ -120,16 +131,16 @@ impl InternEventSender {
 
 enum RecvIterator<'a, T> {
     Disconnected,
-    Receiver(&'a Receiver<T>),
+    Receiver(&'a Mutex<UnboundedReceiver<T>>),
 }
 
 impl<T> Iterator for RecvIterator<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
+        match &*self {
             Self::Disconnected => None,
-            Self::Receiver(recv) => recv.try_recv().ok(),
+            Self::Receiver(recv) => recv.lock().unwrap().try_recv().ok(),
         }
     }
 }
@@ -150,9 +161,9 @@ impl Iterator for ProcessEvents<'_> {
                         *connection = Some(conn);
                         ClientEvent::Connected
                     }
-                    InternEvent::Disconnected => {
+                    InternEvent::Disconnected(err) => {
                         *self.0 = ClientState::Disconnected;
-                        ClientEvent::Disconnected
+                        ClientEvent::Disconnected(err)
                     }
                     InternEvent::Error(error) => ClientEvent::Error(error),
                 })

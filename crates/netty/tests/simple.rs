@@ -1,39 +1,47 @@
 use netty::{
     transport::{
-        ChannelClientTransport, ChannelServerTransport, ClientTransport, ServerTransport,
-        TcpClientTransport, TcpServerTransport,
+        AsyncTransport, ChannelClientTransport, ChannelServerTransport, ClientTransport,
+        ServerTransport, TcpClientTransport, TcpServerTransport,
     },
     *,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[allow(unused)]
-fn channel_transport() -> (ChannelServerTransport, ChannelClientTransport, u64) {
+fn channel_transport<R>(
+) -> (AsyncTransport<ChannelServerTransport, R>, AsyncTransport<ChannelClientTransport, R>, u64) {
     let (server, client) = ChannelServerTransport::new_server_client_pair();
     (server, client, 10)
 }
 
 #[allow(unused)]
-fn tcp_transport() -> (TcpServerTransport, TcpClientTransport, u64) {
-    let (server_addr, server) = TcpServerTransport::bind("127.0.0.1:0").unwrap();
-    dbg!(server_addr);
-    let client = TcpClientTransport::connect(server_addr).unwrap();
+fn tcp_transport<R: Runtime>(
+) -> (AsyncTransport<TcpServerTransport, R>, AsyncTransport<TcpClientTransport, R>, u64) {
+    let (server_addr, server) = TcpServerTransport::bind("127.0.0.1:0");
+    let client = AsyncTransport::new(|runtime| async {
+        let server_addr = server_addr.get().await.unwrap();
+        TcpClientTransport::connect(server_addr).start(runtime).await
+    });
     (server, client, 100)
 }
 
 #[test]
 fn simple() {
-    run_simple(channel_transport());
-    run_simple(tcp_transport());
+    let runtime = Arc::new(NativeRuntime(
+        tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap(),
+    ));
+    run_simple(channel_transport(), Arc::clone(&runtime));
+    run_simple(tcp_transport(), Arc::clone(&runtime));
 }
 
 fn run_simple(
     (server_transport, client_transport, ms): (
-        impl ServerTransport + Send + Sync + 'static,
-        impl ClientTransport + Send + Sync + 'static,
+        AsyncTransport<impl ServerTransport + Send + Sync + 'static, NativeRuntime>,
+        AsyncTransport<impl ClientTransport + Send + Sync + 'static, NativeRuntime>,
         u64,
     ),
+    runtime: Arc<NativeRuntime>,
 ) {
     let mut server = {
         let mut channels = Channels::new();
@@ -47,9 +55,9 @@ fn run_simple(
         Client::new(Arc::new(channels))
     };
 
-    server.start(server_transport);
+    server.start(server_transport, Arc::clone(&runtime));
     sleep(ms);
-    client.connect(client_transport);
+    client.connect(client_transport, runtime);
     sleep(ms);
 
     let server_event = server.process_events().next();
@@ -102,5 +110,5 @@ impl NetworkMessage for ClientToServer {
 }
 
 fn sleep(ms: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(ms));
+    std::thread::sleep(Duration::from_millis(ms));
 }

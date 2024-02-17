@@ -1,16 +1,28 @@
-use super::{ClientTransport, MaxPacketSize, ServerTransport, Transport, TransportError};
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use super::{
+    AsyncTransport, ClientTransport, MaxPacketSize, ServerTransport, Transport, TransportError,
+};
+use crate::Runtime;
 use std::{
     collections::HashMap,
     convert::Infallible,
-    io::{self, ErrorKind, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    io::{self, ErrorKind},
+    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock,
+        Arc,
     },
-    thread,
     time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream, ToSocketAddrs,
+    },
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot, Mutex, RwLock,
+    },
 };
 
 // TODO: Writes on one socket block all other sockets
@@ -19,8 +31,8 @@ use std::{
 #[derive(Debug)]
 pub struct TcpServerTransport {
     is_alive: Arc<AtomicBool>,
-    connections: Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
-    receiver: Receiver<(SocketAddr, Result<Box<[u8]>, ()>)>,
+    connections: Arc<RwLock<HashMap<SocketAddr, OwnedWriteHalf>>>,
+    receiver: Mutex<UnboundedReceiver<(SocketAddr, Result<Box<[u8]>, ()>)>>,
 }
 
 impl Drop for TcpServerTransport {
@@ -30,75 +42,67 @@ impl Drop for TcpServerTransport {
 }
 
 impl TcpServerTransport {
-    pub fn bind<A: ToSocketAddrs>(local_addr: A) -> crate::Result<(SocketAddr, Self)> {
-        let is_alive = Arc::new(AtomicBool::new(true));
+    pub fn bind<A: ToSocketAddrs + Send + 'static, R: Runtime>(
+        local_addr: A,
+    ) -> (TcpServerTransportAddress, AsyncTransport<Self, R>) {
+        let (local_addr_sender, local_addr_receiver) = oneshot::channel();
 
-        let listener = TcpListener::bind(local_addr)?;
-        let local_addr = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
-        let connections = Arc::new(RwLock::new(HashMap::new()));
-        let (sender, receiver) = crossbeam_channel::unbounded();
+        (
+            TcpServerTransportAddress(local_addr_receiver),
+            AsyncTransport::new(move |runtime: Arc<R>| async move {
+                let is_alive = Arc::new(AtomicBool::new(true));
 
-        thread::spawn({
-            let is_alive = Arc::clone(&is_alive);
-            let connections = Arc::clone(&connections);
-            move || Self::accept(is_alive, listener, connections, sender)
-        });
+                let listener = TcpListener::bind(local_addr).await?;
+                local_addr_sender.send(listener.local_addr()?).ok();
+                let connections = Arc::new(RwLock::new(HashMap::new()));
+                let (sender, receiver) = mpsc::unbounded_channel();
 
-        Ok((local_addr, Self { is_alive, connections, receiver }))
+                runtime.spawn({
+                    let is_alive = Arc::clone(&is_alive);
+                    let connections = Arc::clone(&connections);
+                    let runtime = Arc::clone(&runtime);
+                    async move {
+                        Self::accept(is_alive, listener, connections, sender, runtime).await;
+                    }
+                });
+
+                Ok(Self { is_alive, connections, receiver: Mutex::new(receiver) })
+            }),
+        )
     }
 
-    fn accept(
+    async fn accept<R: Runtime>(
         is_alive: Arc<AtomicBool>,
         listener: TcpListener,
-        connections: Arc<RwLock<HashMap<SocketAddr, TcpStream>>>,
-        sender: Sender<(SocketAddr, Result<Box<[u8]>, ()>)>,
+        connections: Arc<RwLock<HashMap<SocketAddr, OwnedWriteHalf>>>,
+        sender: UnboundedSender<(SocketAddr, Result<Box<[u8]>, ()>)>,
+        runtime: Arc<R>,
     ) {
         while is_alive.load(Ordering::Relaxed) {
-            let (stream, addr) = match listener.accept() {
+            let (stream, addr) = match listener.accept().await {
                 Ok((stream, addr)) => (stream, addr),
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut => {
-                        // TODO: wait for fd or timeout 5s instead of buys loop with 100ms sleep
-                        thread::sleep(Duration::from_millis(100));
-                        continue;
-                    }
-                    _ => {
-                        // TODO: send error in channel so that recv_from can return it
-                        thread::sleep(Duration::from_millis(100));
-                        continue;
-                    }
-                },
-            };
-
-            let setup = move || {
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-
-                Ok::<_, io::Error>((stream.try_clone()?, stream))
-            };
-            let (stream_recv, stream_send) = match setup() {
-                Ok((stream_recv, stream_send)) => (stream_recv, stream_send),
                 Err(_e) => {
                     // TODO: send error in channel so that recv_from can return it
+                    runtime.sleep(Duration::from_millis(100));
                     continue;
                 }
             };
 
-            connections.write().unwrap().insert(addr, stream_send);
+            let (stream_recv, stream_send) = stream.into_split();
 
-            thread::spawn({
+            connections.write().await.insert(addr, stream_send);
+
+            runtime.spawn({
                 let is_alive = Arc::clone(&is_alive);
                 let mut stream = stream_recv;
                 let sender = sender.clone();
                 let connections = Arc::clone(&connections);
-                move || {
+                async move {
                     let mut buf = vec![0; Self::MAX_PACKET_SIZE.get()];
                     while is_alive.load(Ordering::Relaxed)
-                        && connections.read().unwrap().contains_key(&addr)
+                        && connections.read().await.contains_key(&addr)
                     {
-                        match impl_recv(&mut stream, &mut buf) {
+                        match impl_recv(&mut stream, &mut buf).await {
                             Ok(size) => {
                                 sender.send((addr, Ok(buf[0..size].into()))).ok();
                             }
@@ -106,7 +110,7 @@ impl TcpServerTransport {
                                 ErrorKind::WouldBlock | ErrorKind::TimedOut => (),
                                 _ => {
                                     // TODO: Recover possible?
-                                    connections.write().unwrap().remove(&addr);
+                                    connections.write().await.remove(&addr);
                                     sender.send((addr, Err(()))).ok();
                                     break;
                                 }
@@ -128,15 +132,15 @@ impl Transport for TcpServerTransport {
 impl ServerTransport for TcpServerTransport {
     type ConnectionId = SocketAddr;
 
-    fn send_to(&self, buf: &[u8], id: Self::ConnectionId) -> Result<(), TransportError<()>> {
-        let mut connections = self.connections.write().unwrap();
+    async fn send_to(&self, buf: &[u8], id: Self::ConnectionId) -> Result<(), TransportError<()>> {
+        let mut connections = self.connections.write().await;
 
         let stream = match connections.get_mut(&id) {
             Some(stream) => stream,
             None => return Err(TransportError::RemoteDisconnected(())),
         };
 
-        match impl_send(stream, buf) {
+        match impl_send(stream, buf).await {
             Ok(()) => Ok(()),
             Err(_) => {
                 // TODO: Recover possible?
@@ -146,44 +150,60 @@ impl ServerTransport for TcpServerTransport {
         }
     }
 
-    fn recv_from(
+    async fn recv_from(
         &self,
         buf: &mut [u8],
     ) -> Result<(usize, Self::ConnectionId), TransportError<Self::ConnectionId>> {
         // Receive
-        match self.receiver.recv_timeout(Duration::from_secs(1)) {
-            Ok((addr, recv)) => match recv {
+        match self.receiver.lock().await.recv().await {
+            Some((addr, recv)) => match recv {
                 Ok(data) => {
                     buf[..data.len()].copy_from_slice(&data);
                     Ok((data.len(), addr))
                 }
                 Err(()) => {
-                    self.connections.write().unwrap().remove(&addr);
+                    self.connections.write().await.remove(&addr);
                     Err(TransportError::RemoteDisconnected(addr))
                 }
             },
-            Err(RecvTimeoutError::Timeout) => Err(TransportError::TimedOut),
-            Err(RecvTimeoutError::Disconnected) => Err(TransportError::Disconnected),
+            None => Err(TransportError::Disconnected),
         }
     }
 
-    fn cleanup(&self, id: Self::ConnectionId) {
-        self.connections.write().unwrap().remove(&id);
+    async fn cleanup(&self, id: Self::ConnectionId) {
+        self.connections.write().await.remove(&id);
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpServerTransportAddress(oneshot::Receiver<SocketAddr>);
+
+impl TcpServerTransportAddress {
+    pub async fn get(self) -> Option<SocketAddr> {
+        self.0.await.ok()
+    }
+
+    pub fn try_get(&mut self) -> Option<SocketAddr> {
+        self.0.try_recv().ok()
     }
 }
 
 #[derive(Debug)]
 pub struct TcpClientTransport {
-    recv: Mutex<TcpStream>,
-    send: Mutex<TcpStream>,
+    recv: Mutex<OwnedReadHalf>,
+    send: Mutex<OwnedWriteHalf>,
 }
 
 impl TcpClientTransport {
-    pub fn connect<A: ToSocketAddrs>(remote_addr: A) -> crate::Result<Self> {
-        let recv = TcpStream::connect(remote_addr)?;
-        let send = recv.try_clone()?;
+    pub fn connect<A: ToSocketAddrs + Send + 'static, R>(
+        remote_addr: A,
+    ) -> AsyncTransport<Self, R> {
+        AsyncTransport::new(|_| async {
+            let stream = TcpStream::connect(remote_addr).await?;
+            let (recv, send) = stream.into_split();
 
-        Ok(Self { recv: Mutex::new(recv), send: Mutex::new(send) })
+            Ok(Self { recv: Mutex::new(recv), send: Mutex::new(send) })
+        })
     }
 }
 
@@ -194,40 +214,36 @@ impl Transport for TcpClientTransport {
 }
 
 impl ClientTransport for TcpClientTransport {
-    fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
-        let run = || {
-            let mut stream = self.send.lock().unwrap();
-            impl_send(&mut stream, buf)
-        };
-
-        match run() {
+    async fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
+        match impl_send(&mut *self.send.lock().await, buf).await {
             Ok(()) => Ok(()),
             Err(_) => Err(TransportError::Disconnected), // TODO: Recover possible?
         }
     }
 
-    fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
-        let mut run = || {
-            let mut stream = self.recv.lock().unwrap();
-            impl_recv(&mut stream, buf)
-        };
-
-        match run() {
+    async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
+        match impl_recv(&mut *self.recv.lock().await, buf).await {
             Ok(size) => Ok(size),
             Err(_) => Err(TransportError::Disconnected), // TODO: Recover possible?
         }
     }
 }
 
-fn impl_send(stream: &mut TcpStream, buf: &[u8]) -> io::Result<()> {
-    stream.write_all(&u32::to_le_bytes(buf.len() as u32))?;
-    stream.write_all(buf)?;
+async fn impl_send<S>(stream: &mut S, buf: &[u8]) -> io::Result<()>
+where
+    S: AsyncWriteExt + Unpin,
+{
+    stream.write_all(&u32::to_le_bytes(buf.len() as u32)).await?;
+    stream.write_all(buf).await?;
     Ok(())
 }
 
-fn impl_recv(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<usize> {
+async fn impl_recv<S>(stream: &mut S, buf: &mut [u8]) -> io::Result<usize>
+where
+    S: AsyncReadExt + Unpin,
+{
     let mut size_buf = [0u8; 4];
-    stream.read_exact(&mut size_buf)?;
+    stream.read_exact(&mut size_buf).await?;
     let size = u32::from_le_bytes(size_buf) as usize;
 
     if size > buf.len() {
@@ -237,7 +253,7 @@ fn impl_recv(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<usize> {
         ));
     }
 
-    stream.read_exact(&mut buf[0..size])?;
+    stream.read_exact(&mut buf[0..size]).await?;
 
     Ok(size)
 }

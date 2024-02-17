@@ -1,13 +1,21 @@
 mod channel;
+#[cfg(not(target_arch = "wasm32"))]
 mod tcp;
+#[cfg(not(target_arch = "wasm32"))]
 mod udp;
 
-use std::{convert::Infallible, fmt::Debug, hash::Hash, ops::Deref, sync::Mutex};
+use crate::{Result, WasmNotSend};
+use std::{
+    convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, pin::Pin, sync::Arc,
+};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
+pub use self::channel::{ChannelClientTransport, ChannelServerTransport};
+
+#[cfg(not(target_arch = "wasm32"))]
 pub use self::{
-    channel::{ChannelClientTransport, ChannelServerTransport},
-    tcp::{TcpClientTransport, TcpServerTransport},
+    tcp::{TcpClientTransport, TcpServerTransport, TcpServerTransportAddress},
     udp::{UdpClientTransport, UdpServerTransport},
 };
 
@@ -30,17 +38,28 @@ pub enum TransportError<C> {
 pub trait ServerTransport: Transport {
     type ConnectionId: Debug + Copy + PartialEq + Eq + Hash + Send + Sync + 'static;
 
-    fn send_to(&self, buf: &[u8], id: Self::ConnectionId) -> Result<(), TransportError<()>>;
+    fn send_to(
+        &self,
+        buf: &[u8],
+        id: Self::ConnectionId,
+    ) -> impl Future<Output = Result<(), TransportError<()>>> + WasmNotSend;
     fn recv_from(
         &self,
         buf: &mut [u8],
-    ) -> Result<(usize, Self::ConnectionId), TransportError<Self::ConnectionId>>;
-    fn cleanup(&self, id: Self::ConnectionId);
+    ) -> impl Future<Output = Result<(usize, Self::ConnectionId), TransportError<Self::ConnectionId>>>
+           + WasmNotSend;
+    fn cleanup(&self, id: Self::ConnectionId) -> impl Future<Output = ()> + WasmNotSend;
 }
 
 pub trait ClientTransport: Transport {
-    fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>>;
-    fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>>;
+    fn send(
+        &self,
+        buf: &[u8],
+    ) -> impl Future<Output = Result<(), TransportError<Infallible>>> + WasmNotSend;
+    fn recv(
+        &self,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, TransportError<Infallible>>> + WasmNotSend;
 }
 
 pub trait Transport {
@@ -61,6 +80,30 @@ pub struct TransportProperties {
     pub is_reliable: bool,
     pub is_ordered: bool,
     pub max_packet_size: MaxPacketSize, // TODO: Make this a function, so the transport can change it at runtime ???
+}
+
+pub struct AsyncTransport<T, R>(
+    #[cfg(target_arch = "wasm32")]
+    Box<dyn FnOnce(Arc<R>) -> Pin<Box<dyn Future<Output = Result<T>> + 'static>> + Send + 'static>,
+    #[cfg(not(target_arch = "wasm32"))]
+    Box<
+        dyn FnOnce(Arc<R>) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>
+            + Send
+            + 'static,
+    >,
+);
+
+impl<T, R> AsyncTransport<T, R> {
+    pub fn new<F>(f: impl FnOnce(Arc<R>) -> F + Send + 'static) -> Self
+    where
+        F: Future<Output = Result<T>> + WasmNotSend + 'static,
+    {
+        Self(Box::new(|runtime| Box::pin(f(runtime))))
+    }
+
+    pub async fn start(self, runtime: Arc<R>) -> Result<T> {
+        (self.0)(runtime).await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,17 +164,17 @@ where
 
 impl<T> ClientTransport for ReconnectOnDisconnectClientTransport<T>
 where
-    T: ClientTransport,
+    T: ClientTransport + Send + Sync + 'static,
 {
-    fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
-        let err = match self.transport.lock().unwrap().send(buf) {
+    async fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
+        let err = match self.transport.lock().await.send(buf).await {
             Ok(()) => return Ok(()),
             Err(err) => err,
         };
 
         match err {
             TransportError::Disconnected => {
-                let mut transport = self.transport.lock().unwrap();
+                let mut transport = self.transport.lock().await;
                 *transport = match (self.reconnect)() {
                     Ok(transport) => transport,
                     Err(err) => return Err(TransportError::Internal(err)),
@@ -144,15 +187,15 @@ where
         }
     }
 
-    fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
-        let err = match self.transport.lock().unwrap().recv(buf) {
+    async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
+        let err = match self.transport.lock().await.recv(buf).await {
             Ok(size) => return Ok(size),
             Err(err) => err,
         };
 
         match err {
             TransportError::Disconnected => {
-                let mut transport = self.transport.lock().unwrap();
+                let mut transport = self.transport.lock().await;
                 *transport = match (self.reconnect)() {
                     Ok(transport) => transport,
                     Err(err) => return Err(TransportError::Internal(err)),

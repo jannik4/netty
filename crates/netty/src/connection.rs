@@ -2,8 +2,12 @@ use crate::{
     new_data::NewDataAvailable, transport::TransportProperties, Channel, ChannelId, Channels,
     DecodeError, NetworkDecode, NetworkMessage,
 };
-use crossbeam_channel::Receiver;
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 pub struct ConnectionState {
     transport_properties: TransportProperties,
@@ -36,7 +40,7 @@ impl ConnectionState {
         }
     }
 
-    pub(crate) fn get_receiver<T>(&self) -> &Receiver<T>
+    pub(crate) fn get_receiver<T>(&self) -> &Mutex<UnboundedReceiver<T>>
     where
         T: NetworkDecode + NetworkMessage + 'static,
     {
@@ -99,14 +103,14 @@ impl DecodeRecvFactory {
         T: NetworkDecode + NetworkMessage + Send + 'static,
     {
         Self(Box::new(|new_data| {
-            let (sender, receiver) = crossbeam_channel::unbounded();
+            let (sender, receiver) = mpsc::unbounded_channel();
             let decode = Box::new(move |buf: &[u8]| {
                 let message = T::decode(buf)?;
                 sender.send(message).ok();
                 new_data.notify();
                 Ok(())
             });
-            let recv = Box::new(receiver);
+            let recv = Box::new(Mutex::new(receiver));
             (decode, recv)
         }))
     }

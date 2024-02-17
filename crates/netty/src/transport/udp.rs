@@ -1,10 +1,6 @@
 use super::{ClientTransport, MaxPacketSize, ServerTransport, Transport, TransportError};
-use std::{
-    convert::Infallible,
-    io::ErrorKind,
-    net::{SocketAddr, ToSocketAddrs, UdpSocket},
-    time::Duration,
-};
+use std::{convert::Infallible, io::ErrorKind, net::SocketAddr};
+use tokio::net::{ToSocketAddrs, UdpSocket};
 
 #[derive(Debug)]
 pub struct UdpServerTransport {
@@ -12,10 +8,8 @@ pub struct UdpServerTransport {
 }
 
 impl UdpServerTransport {
-    pub fn bind<A: ToSocketAddrs>(local_addr: A) -> crate::Result<Self> {
-        let socket = UdpSocket::bind(local_addr)?;
-        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-        socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+    pub async fn bind<A: ToSocketAddrs>(local_addr: A) -> crate::Result<Self> {
+        let socket = UdpSocket::bind(local_addr).await?;
 
         Ok(Self { socket })
     }
@@ -30,8 +24,8 @@ impl Transport for UdpServerTransport {
 impl ServerTransport for UdpServerTransport {
     type ConnectionId = SocketAddr;
 
-    fn send_to(&self, buf: &[u8], id: Self::ConnectionId) -> Result<(), TransportError<()>> {
-        match self.socket.send_to(buf, id) {
+    async fn send_to(&self, buf: &[u8], id: Self::ConnectionId) -> Result<(), TransportError<()>> {
+        match self.socket.send_to(buf, id).await {
             Ok(size) if size == buf.len() => Ok(()),
             Ok(_) => Err(TransportError::Internal(Box::new(std::io::Error::new(
                 ErrorKind::Other,
@@ -44,11 +38,11 @@ impl ServerTransport for UdpServerTransport {
         }
     }
 
-    fn recv_from(
+    async fn recv_from(
         &self,
         buf: &mut [u8],
     ) -> Result<(usize, Self::ConnectionId), TransportError<Self::ConnectionId>> {
-        match self.socket.recv_from(buf) {
+        match self.socket.recv_from(buf).await {
             Ok((size, addr)) => Ok((size, addr)),
             Err(e) => match e.kind() {
                 ErrorKind::WouldBlock | ErrorKind::TimedOut => Err(TransportError::TimedOut),
@@ -57,7 +51,7 @@ impl ServerTransport for UdpServerTransport {
         }
     }
 
-    fn cleanup(&self, _id: Self::ConnectionId) {
+    async fn cleanup(&self, _id: Self::ConnectionId) {
         // Nothing to do, since UDP is connectionless
     }
 }
@@ -68,14 +62,12 @@ pub struct UdpClientTransport {
 }
 
 impl UdpClientTransport {
-    pub fn connect<A: ToSocketAddrs, B: ToSocketAddrs>(
+    pub async fn connect<A: ToSocketAddrs, B: ToSocketAddrs>(
         local_addr: A,
         remote_addr: B,
     ) -> crate::Result<Self> {
-        let socket = UdpSocket::bind(local_addr)?;
-        socket.connect(remote_addr)?;
-        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-        socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let socket: UdpSocket = UdpSocket::bind(local_addr).await?;
+        socket.connect(remote_addr).await?;
 
         Ok(Self { socket })
     }
@@ -88,8 +80,8 @@ impl Transport for UdpClientTransport {
 }
 
 impl ClientTransport for UdpClientTransport {
-    fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
-        match self.socket.send(buf) {
+    async fn send(&self, buf: &[u8]) -> Result<(), TransportError<Infallible>> {
+        match self.socket.send(buf).await {
             Ok(size) if size == buf.len() => Ok(()),
             Ok(_) => Err(TransportError::Internal(Box::new(std::io::Error::new(
                 ErrorKind::Other,
@@ -102,8 +94,8 @@ impl ClientTransport for UdpClientTransport {
         }
     }
 
-    fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
-        match self.socket.recv(buf) {
+    async fn recv(&self, buf: &mut [u8]) -> Result<usize, TransportError<Infallible>> {
+        match self.socket.recv(buf).await {
             Ok(size) => Ok(size),
             Err(e) => match e.kind() {
                 ErrorKind::WouldBlock | ErrorKind::TimedOut => Err(TransportError::TimedOut),
