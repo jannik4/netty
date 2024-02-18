@@ -49,7 +49,7 @@ impl Server {
         Self { channels, state: ServerState::Disconnected }
     }
 
-    pub fn start<T: ServerTransports<R>, R: Runtime>(&mut self, transports: T, runtime: Arc<R>) {
+    pub fn start<T: ServerTransports>(&mut self, transports: T, runtime: Arc<dyn Runtime>) {
         self.stop();
 
         let (intern_send, intern_recv) = mpsc::unbounded_channel();
@@ -317,23 +317,22 @@ impl Iterator for ProcessEvents<'_> {
     }
 }
 
-pub struct ServerTransportsParams<R> {
+pub struct ServerTransportsParams {
     channels: Arc<Channels>,
     intern_events: InternEventSender,
     new_data: Arc<NewDataAvailable>,
-    runtime: Arc<R>,
+    runtime: Arc<dyn Runtime>,
 }
 
-pub trait ServerTransports<R> {
-    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>>;
+pub trait ServerTransports {
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>>;
 }
 
-impl<A, R> ServerTransports<R> for AsyncTransport<A, R>
+impl<A> ServerTransports for AsyncTransport<A>
 where
     A: ServerTransport + Send + Sync + 'static,
-    R: Runtime,
 {
-    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>> {
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
         let a = self;
         vec![Arc::new(runner::start(
             a,
@@ -346,13 +345,12 @@ where
     }
 }
 
-impl<A, B, R> ServerTransports<R> for (AsyncTransport<A, R>, AsyncTransport<B, R>)
+impl<A, B> ServerTransports for (AsyncTransport<A>, AsyncTransport<B>)
 where
     A: ServerTransport + Send + Sync + 'static,
     B: ServerTransport + Send + Sync + 'static,
-    R: Runtime,
 {
-    fn start(self, params: ServerTransportsParams<R>) -> Vec<Arc<RunnerHandle>> {
+    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
         let (a, b) = self;
         vec![
             Arc::new(runner::start(

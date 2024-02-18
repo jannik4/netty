@@ -4,7 +4,7 @@ use crate::{
     new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
     transport::{AsyncTransport, ClientTransport, TransportError},
-    ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError, Runtime,
+    ChannelConfig, ChannelId, Channels, NetworkEncode, NetworkError, Runtime, RuntimeExt,
 };
 use std::{
     sync::{
@@ -18,16 +18,15 @@ use tokio::sync::{
     Mutex,
 };
 
-pub(super) fn start<T, R>(
-    transport: AsyncTransport<T, R>,
-    runtime: Arc<R>,
+pub(super) fn start<T>(
+    transport: AsyncTransport<T>,
+    runtime: Arc<dyn Runtime>,
     channels: Arc<Channels>,
     intern_events: InternEventSender,
     new_data: Arc<NewDataAvailable>,
 ) -> RunnerHandle
 where
     T: ClientTransport + Send + Sync + 'static,
-    R: Runtime,
 {
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
@@ -105,7 +104,7 @@ enum RunnerTask {
     },
 }
 
-struct Runner<T, R> {
+struct Runner<T> {
     is_alive: Arc<AtomicBool>,
 
     transport: T,
@@ -117,10 +116,10 @@ struct Runner<T, R> {
 
     tasks_recv: Mutex<UnboundedReceiver<RunnerTask>>,
 
-    runtime: Arc<R>,
+    runtime: Arc<dyn Runtime>,
 }
 
-impl<T: ClientTransport + Send + Sync + 'static, R: Runtime> Runner<T, R> {
+impl<T: ClientTransport + Send + Sync + 'static> Runner<T> {
     fn run(self) {
         let this = Arc::new(self);
 

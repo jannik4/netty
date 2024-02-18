@@ -4,7 +4,7 @@ mod tcp;
 #[cfg(not(target_arch = "wasm32"))]
 mod udp;
 
-use crate::{Result, WasmNotSend};
+use crate::{Result, Runtime, WasmNotSend};
 use std::{
     convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, pin::Pin, sync::Arc,
 };
@@ -82,26 +82,30 @@ pub struct TransportProperties {
     pub max_packet_size: MaxPacketSize, // TODO: Make this a function, so the transport can change it at runtime ???
 }
 
-pub struct AsyncTransport<T, R>(
+pub struct AsyncTransport<T>(
     #[cfg(target_arch = "wasm32")]
-    Box<dyn FnOnce(Arc<R>) -> Pin<Box<dyn Future<Output = Result<T>> + 'static>> + Send + 'static>,
+    Box<
+        dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + 'static>>
+            + Send
+            + 'static,
+    >,
     #[cfg(not(target_arch = "wasm32"))]
     Box<
-        dyn FnOnce(Arc<R>) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>
+        dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>
             + Send
             + 'static,
     >,
 );
 
-impl<T, R> AsyncTransport<T, R> {
-    pub fn new<F>(f: impl FnOnce(Arc<R>) -> F + Send + 'static) -> Self
+impl<T> AsyncTransport<T> {
+    pub fn new<F>(f: impl FnOnce(Arc<dyn Runtime>) -> F + Send + 'static) -> Self
     where
         F: Future<Output = Result<T>> + WasmNotSend + 'static,
     {
         Self(Box::new(|runtime| Box::pin(f(runtime))))
     }
 
-    pub async fn start(self, runtime: Arc<R>) -> Result<T> {
+    pub async fn start(self, runtime: Arc<dyn Runtime>) -> Result<T> {
         (self.0)(runtime).await
     }
 }

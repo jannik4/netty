@@ -34,8 +34,8 @@ pub fn runtime() -> BevyNettyRuntime {
 
 #[cfg(target_arch = "wasm32")]
 mod runtime {
-    use netty::{Runtime, WasmNotSend};
-    use std::{future::Future, time::Duration};
+    use netty::{Runtime, RuntimeFuture};
+    use std::time::Duration;
 
     pub type BevyNettyRuntime = &'static IoTaskPoolWrapper;
 
@@ -52,15 +52,11 @@ mod runtime {
     pub struct IoTaskPoolWrapper(&'static bevy_tasks::IoTaskPool);
 
     impl Runtime for &'static IoTaskPoolWrapper {
-        fn spawn<F>(&self, f: F)
-        where
-            F: Future<Output = ()> + WasmNotSend + 'static,
-        {
+        fn spawn_boxed(&self, f: RuntimeFuture<()>) {
             self.0.spawn(f).detach();
         }
-
-        async fn sleep(&self, duration: Duration) {
-            gloo_timers::future::TimeoutFuture::new(duration.as_millis() as u32).await;
+        fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+            Box::pin(gloo_timers::future::TimeoutFuture::new(duration.as_millis() as u32))
         }
     }
 }

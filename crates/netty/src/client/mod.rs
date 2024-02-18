@@ -35,10 +35,9 @@ impl Client {
         Self { channels, state: ClientState::Disconnected }
     }
 
-    pub fn connect<T, R>(&mut self, transport: AsyncTransport<T, R>, runtime: Arc<R>)
+    pub fn connect<T>(&mut self, transport: AsyncTransport<T>, runtime: Arc<dyn Runtime>)
     where
         T: ClientTransport + Send + Sync + 'static,
-        R: Runtime,
     {
         self.disconnect();
 

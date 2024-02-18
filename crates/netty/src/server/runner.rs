@@ -6,7 +6,7 @@ use crate::{
     new_data::NewDataAvailable,
     protocol::{self, InternalC2S, InternalS2C},
     transport::{AsyncTransport, ServerTransport, TransportError},
-    ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError, Runtime,
+    ChannelConfig, ChannelId, ConnectionHandle, NetworkEncode, NetworkError, Runtime, RuntimeExt,
 };
 use double_key_map::DoubleKeyMap;
 use std::sync::{
@@ -19,9 +19,9 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-pub(super) fn start<T, R>(
-    transport: AsyncTransport<T, R>,
-    runtime: Arc<R>,
+pub(super) fn start<T>(
+    transport: AsyncTransport<T>,
+    runtime: Arc<dyn Runtime>,
     transport_idx: TransportIdx,
     channels: Arc<Channels>,
     intern_events: InternEventSender,
@@ -29,7 +29,6 @@ pub(super) fn start<T, R>(
 ) -> RunnerHandle
 where
     T: ServerTransport + Send + Sync + 'static,
-    R: Runtime,
 {
     // TODO: Remove this when reliability and ordering are implemented
     assert!(T::IS_ORDERED);
@@ -113,7 +112,7 @@ enum RunnerTask {
     },
 }
 
-struct Runner<T: ServerTransport, R> {
+struct Runner<T: ServerTransport> {
     is_alive: Arc<AtomicBool>,
 
     transport: T,
@@ -129,10 +128,10 @@ struct Runner<T: ServerTransport, R> {
 
     new_data: Arc<NewDataAvailable>,
 
-    runtime: Arc<R>,
+    runtime: Arc<dyn Runtime>,
 }
 
-impl<T: ServerTransport + Send + Sync + 'static, R: Runtime> Runner<T, R> {
+impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
     fn run(self) {
         let this = Arc::new(self);
 

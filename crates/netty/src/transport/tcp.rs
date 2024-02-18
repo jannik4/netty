@@ -1,7 +1,7 @@
 use super::{
     AsyncTransport, ClientTransport, MaxPacketSize, ServerTransport, Transport, TransportError,
 };
-use crate::Runtime;
+use crate::{Runtime, RuntimeExt};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -42,14 +42,14 @@ impl Drop for TcpServerTransport {
 }
 
 impl TcpServerTransport {
-    pub fn bind<A: ToSocketAddrs + Send + 'static, R: Runtime>(
+    pub fn bind<A: ToSocketAddrs + Send + 'static>(
         local_addr: A,
-    ) -> (TcpServerTransportAddress, AsyncTransport<Self, R>) {
+    ) -> (TcpServerTransportAddress, AsyncTransport<Self>) {
         let (local_addr_sender, local_addr_receiver) = oneshot::channel();
 
         (
             TcpServerTransportAddress(local_addr_receiver),
-            AsyncTransport::new(move |runtime: Arc<R>| async move {
+            AsyncTransport::new(move |runtime: Arc<dyn Runtime>| async move {
                 let is_alive = Arc::new(AtomicBool::new(true));
 
                 let listener = TcpListener::bind(local_addr).await?;
@@ -71,12 +71,12 @@ impl TcpServerTransport {
         )
     }
 
-    async fn accept<R: Runtime>(
+    async fn accept(
         is_alive: Arc<AtomicBool>,
         listener: TcpListener,
         connections: Arc<RwLock<HashMap<SocketAddr, OwnedWriteHalf>>>,
         sender: UnboundedSender<(SocketAddr, Result<Box<[u8]>, ()>)>,
-        runtime: Arc<R>,
+        runtime: Arc<dyn Runtime>,
     ) {
         while is_alive.load(Ordering::Relaxed) {
             let (stream, addr) = match listener.accept().await {
@@ -195,9 +195,7 @@ pub struct TcpClientTransport {
 }
 
 impl TcpClientTransport {
-    pub fn connect<A: ToSocketAddrs + Send + 'static, R>(
-        remote_addr: A,
-    ) -> AsyncTransport<Self, R> {
+    pub fn connect<A: ToSocketAddrs + Send + 'static>(remote_addr: A) -> AsyncTransport<Self> {
         AsyncTransport::new(|_| async {
             let stream = TcpStream::connect(remote_addr).await?;
             let (recv, send) = stream.into_split();

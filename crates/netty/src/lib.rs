@@ -13,7 +13,7 @@ mod server;
 
 pub mod transport;
 
-use std::{future::Future, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 use thiserror::Error;
 
 pub use {
@@ -114,25 +114,66 @@ struct Channel {
     ty_name: &'static str,
 }
 
-pub trait Runtime: native_only_tokio::NativeOnlyTokio + Send + Sync + 'static {
-    fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = ()> + WasmNotSend + 'static;
+#[cfg(target_arch = "wasm32")]
+pub type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend;
+#[cfg(not(target_arch = "wasm32"))]
+pub type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+pub trait Runtime: native_only_tokio::NativeOnlyTokio + Send + Sync + 'static {
+    fn spawn_boxed(&self, f: RuntimeFuture<()>);
+    fn sleep(&self, duration: Duration) -> RuntimeFuture<()>;
 }
 
+impl Runtime for Box<dyn Runtime> {
+    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+        (**self).spawn_boxed(f);
+    }
+
+    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+        (**self).sleep(duration)
+    }
+}
+
+impl Runtime for std::sync::Arc<dyn Runtime> {
+    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+        (**self).spawn_boxed(f);
+    }
+
+    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+        (**self).sleep(duration)
+    }
+}
+
+pub trait RuntimeExt: Runtime {
+    #[cfg(target_arch = "wasm32")]
+    fn spawn(&self, f: impl Future<Output = ()> + 'static) {
+        self.spawn_boxed(Box::pin(f));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn(&self, f: impl Future<Output = ()> + Send + 'static) {
+        self.spawn_boxed(Box::pin(f));
+    }
+}
+
+impl<T: Runtime> RuntimeExt for T {}
+
+#[cfg(target_arch = "wasm32")]
 mod native_only_tokio {
     pub trait NativeOnlyTokio {}
 
-    #[cfg(target_arch = "wasm32")]
     impl<T> NativeOnlyTokio for T {}
+}
 
-    #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
+mod native_only_tokio {
+    pub trait NativeOnlyTokio {}
+
     impl NativeOnlyTokio for super::NativeRuntime {}
-
-    #[cfg(not(target_arch = "wasm32"))]
     impl NativeOnlyTokio for &'static super::NativeRuntime {}
+    impl NativeOnlyTokio for Box<dyn super::Runtime> {}
+    impl NativeOnlyTokio for std::sync::Arc<dyn super::Runtime> {}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -141,28 +182,20 @@ pub struct NativeRuntime(pub tokio::runtime::Runtime);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime for NativeRuntime {
-    fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = ()> + WasmNotSend + 'static,
-    {
+    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
         self.0.spawn(f);
     }
-
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend {
-        tokio::time::sleep(duration)
+    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+        Box::pin(tokio::time::sleep(duration))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime for &'static NativeRuntime {
-    fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = ()> + WasmNotSend + 'static,
-    {
-        (*self).spawn(f);
+    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+        (*self).spawn_boxed(f);
     }
-
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + WasmNotSend {
+    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
         (*self).sleep(duration)
     }
 }

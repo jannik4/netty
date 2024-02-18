@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
 #[allow(unused)]
-fn channel_transport<R>(
-) -> (AsyncTransport<ChannelServerTransport, R>, AsyncTransport<ChannelClientTransport, R>, u64) {
+fn channel_transport(
+) -> (AsyncTransport<ChannelServerTransport>, AsyncTransport<ChannelClientTransport>, u64) {
     let (server, client) = ChannelServerTransport::new_server_client_pair();
     (server, client, 10)
 }
 
 #[allow(unused)]
-fn tcp_transport<R: Runtime>(
-) -> (AsyncTransport<TcpServerTransport, R>, AsyncTransport<TcpClientTransport, R>, u64) {
+fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpClientTransport>, u64)
+{
     let (server_addr, server) = TcpServerTransport::bind("127.0.0.1:0");
     let client = AsyncTransport::new(|runtime| async {
         let server_addr = server_addr.get().await.unwrap();
@@ -28,7 +28,7 @@ fn tcp_transport<R: Runtime>(
 
 #[test]
 fn simple() {
-    let runtime = Arc::new(NativeRuntime(
+    let runtime: Arc<dyn Runtime> = Arc::new(NativeRuntime(
         tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap(),
     ));
     run_simple(channel_transport(), Arc::clone(&runtime));
@@ -37,11 +37,11 @@ fn simple() {
 
 fn run_simple(
     (server_transport, client_transport, ms): (
-        AsyncTransport<impl ServerTransport + Send + Sync + 'static, NativeRuntime>,
-        AsyncTransport<impl ClientTransport + Send + Sync + 'static, NativeRuntime>,
+        AsyncTransport<impl ServerTransport + Send + Sync + 'static>,
+        AsyncTransport<impl ClientTransport + Send + Sync + 'static>,
         u64,
     ),
-    runtime: Arc<NativeRuntime>,
+    runtime: Arc<dyn Runtime>,
 ) {
     let mut server = {
         let mut channels = Channels::new();

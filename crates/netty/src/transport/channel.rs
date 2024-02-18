@@ -17,7 +17,7 @@ pub struct ChannelServerTransport {
 }
 
 impl ChannelServerTransport {
-    pub fn new<R>() -> (AsyncTransport<Self, R>, ClientFactory) {
+    pub fn new() -> (AsyncTransport<Self>, ClientFactory) {
         let connections = Arc::new(RwLock::new(HashMap::new()));
         let (client_sender, receiver) = mpsc::unbounded_channel();
 
@@ -27,8 +27,8 @@ impl ChannelServerTransport {
         (AsyncTransport::new(|_| async { Ok(this) }), factory)
     }
 
-    pub fn new_server_client_pair<R>(
-    ) -> (AsyncTransport<Self, R>, AsyncTransport<ChannelClientTransport, R>) {
+    pub fn new_server_client_pair() -> (AsyncTransport<Self>, AsyncTransport<ChannelClientTransport>)
+    {
         let (server, mut factory) = Self::new();
         let client = factory.create_client();
 
@@ -123,7 +123,7 @@ pub struct ClientFactory {
 }
 
 impl ClientFactory {
-    pub fn create_client<R>(&mut self) -> AsyncTransport<ChannelClientTransport, R> {
+    pub fn create_client(&mut self) -> AsyncTransport<ChannelClientTransport> {
         let id = self.next_id;
         self.next_id.0 += 1;
 
