@@ -20,7 +20,7 @@ pub use {
     self::{
         client::{Client, ClientEvent},
         handle::ConnectionHandle,
-        server::{Server, ServerEvent},
+        server::{Server, ServerEvent, ServerTransports},
     },
     bytes::Bytes,
     channel::Channels,

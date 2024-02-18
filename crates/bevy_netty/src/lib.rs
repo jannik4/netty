@@ -26,7 +26,9 @@ impl Plugin for NettyPlugin {
     }
 }
 
-pub fn runtime() -> impl netty::Runtime {
+pub type BevyNettyRuntime = runtime::BevyNettyRuntime;
+
+pub fn runtime() -> BevyNettyRuntime {
     runtime::get()
 }
 
@@ -35,9 +37,11 @@ mod runtime {
     use netty::{Runtime, WasmNotSend};
     use std::{future::Future, time::Duration};
 
-    pub fn get() -> impl netty::Runtime {
+    pub type BevyNettyRuntime = &'static IoTaskPoolWrapper;
+
+    pub fn get() -> BevyNettyRuntime {
         unsafe {
-            std::mem::transmute::<&'static bevy_tasks::IoTaskPool, &'static BevyNettyRuntime>(
+            std::mem::transmute::<&'static bevy_tasks::IoTaskPool, &'static IoTaskPoolWrapper>(
                 bevy_tasks::IoTaskPool::get(),
             )
         }
@@ -45,9 +49,9 @@ mod runtime {
 
     #[derive(Debug)]
     #[repr(transparent)]
-    struct BevyNettyRuntime(&'static bevy_tasks::IoTaskPool);
+    pub struct IoTaskPoolWrapper(&'static bevy_tasks::IoTaskPool);
 
-    impl Runtime for &'static BevyNettyRuntime {
+    impl Runtime for &'static IoTaskPoolWrapper {
         fn spawn<F>(&self, f: F)
         where
             F: Future<Output = ()> + WasmNotSend + 'static,
@@ -66,8 +70,10 @@ mod runtime {
     use netty::NativeRuntime;
     use std::sync::OnceLock;
 
+    pub type BevyNettyRuntime = &'static NativeRuntime;
+
     // TODO: Make configurable
-    pub fn get() -> impl netty::Runtime {
+    pub fn get() -> &'static NativeRuntime {
         static INSTANCE: OnceLock<NativeRuntime> = OnceLock::new();
         INSTANCE.get_or_init(|| {
             NativeRuntime(
