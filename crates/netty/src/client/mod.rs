@@ -35,22 +35,18 @@ impl Client {
         Self { channels, state: ClientState::Disconnected }
     }
 
-    pub fn connect<T>(&mut self, transport: AsyncTransport<T>, runtime: Arc<dyn Runtime>)
-    where
-        T: ClientTransport + Send + Sync + 'static,
-    {
+    pub fn connect(&mut self, transport: impl AsyncClientTransport, runtime: Arc<dyn Runtime>) {
         self.disconnect();
 
         let (intern_send, intern_recv) = mpsc::unbounded_channel();
         let new_data = Arc::new(NewDataAvailable::new());
 
-        let runner = runner::start(
-            transport,
+        let runner = Box::new(transport).start(ClientTransportsParams {
+            channels: Arc::clone(&self.channels),
+            intern_events: InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
+            new_data: Arc::clone(&new_data),
             runtime,
-            Arc::clone(&self.channels),
-            InternEventSender { intern_send, new_data: Arc::clone(&new_data) },
-            Arc::clone(&new_data),
-        );
+        });
 
         self.state = ClientState::Running { runner, intern_recv, connection: None, new_data };
     }
@@ -168,5 +164,38 @@ impl Iterator for ProcessEvents<'_> {
                 })
             }
         }
+    }
+}
+
+pub struct ClientTransportsParams {
+    channels: Arc<Channels>,
+    intern_events: InternEventSender,
+    new_data: Arc<NewDataAvailable>,
+    runtime: Arc<dyn Runtime>,
+}
+
+pub trait AsyncClientTransport {
+    fn start(self: Box<Self>, params: ClientTransportsParams) -> RunnerHandle;
+}
+
+impl AsyncClientTransport for Box<dyn AsyncClientTransport + Send + Sync + 'static> {
+    fn start(self: Box<Self>, params: ClientTransportsParams) -> RunnerHandle {
+        (*self).start(params)
+    }
+}
+
+impl<T> AsyncClientTransport for AsyncTransport<T>
+where
+    T: ClientTransport + Send + Sync + 'static,
+{
+    fn start(self: Box<Self>, params: ClientTransportsParams) -> RunnerHandle {
+        let transport = *self;
+        runner::start(
+            transport,
+            params.runtime,
+            params.channels,
+            params.intern_events,
+            params.new_data,
+        )
     }
 }

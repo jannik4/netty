@@ -49,12 +49,12 @@ impl Server {
         Self { channels, state: ServerState::Disconnected }
     }
 
-    pub fn start<T: ServerTransports>(&mut self, transports: T, runtime: Arc<dyn Runtime>) {
+    pub fn start(&mut self, transports: impl AsyncServerTransports, runtime: Arc<dyn Runtime>) {
         self.stop();
 
         let (intern_send, intern_recv) = mpsc::unbounded_channel();
         let new_data = Arc::new(NewDataAvailable::new());
-        let runners = transports.start(ServerTransportsParams {
+        let runners = Box::new(transports).start(ServerTransportsParams {
             channels: Arc::clone(&self.channels),
             intern_events: InternEventSender {
                 intern_send: intern_send.clone(),
@@ -324,16 +324,22 @@ pub struct ServerTransportsParams {
     runtime: Arc<dyn Runtime>,
 }
 
-pub trait ServerTransports {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>>;
+pub trait AsyncServerTransports {
+    fn start(self: Box<Self>, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>>;
 }
 
-impl<A> ServerTransports for AsyncTransport<A>
+impl AsyncServerTransports for Box<dyn AsyncServerTransports + Send + Sync + 'static> {
+    fn start(self: Box<Self>, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+        (*self).start(params)
+    }
+}
+
+impl<A> AsyncServerTransports for AsyncTransport<A>
 where
     A: ServerTransport + Send + Sync + 'static,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
-        let a = self;
+    fn start(self: Box<Self>, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+        let a = *self;
         vec![Arc::new(runner::start(
             a,
             params.runtime,
@@ -345,13 +351,13 @@ where
     }
 }
 
-impl<A, B> ServerTransports for (AsyncTransport<A>, AsyncTransport<B>)
+impl<A, B> AsyncServerTransports for (AsyncTransport<A>, AsyncTransport<B>)
 where
     A: ServerTransport + Send + Sync + 'static,
     B: ServerTransport + Send + Sync + 'static,
 {
-    fn start(self, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
-        let (a, b) = self;
+    fn start(self: Box<Self>, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+        let (a, b) = *self;
         vec![
             Arc::new(runner::start(
                 a,

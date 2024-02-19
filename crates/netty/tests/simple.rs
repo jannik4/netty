@@ -28,9 +28,9 @@ fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpCli
 
 #[test]
 fn simple() {
-    let runtime: Arc<dyn Runtime> = Arc::new(NativeRuntime(
+    let runtime: Arc<dyn Runtime> = Arc::new(
         tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap(),
-    ));
+    );
     run_simple(channel_transport(), Arc::clone(&runtime));
     run_simple(tcp_transport(), Arc::clone(&runtime));
 }

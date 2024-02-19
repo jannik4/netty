@@ -63,22 +63,19 @@ mod runtime {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime {
-    use netty::NativeRuntime;
     use std::sync::OnceLock;
 
-    pub type BevyNettyRuntime = &'static NativeRuntime;
+    pub type BevyNettyRuntime = &'static tokio::runtime::Runtime;
 
     // TODO: Make configurable
-    pub fn get() -> &'static NativeRuntime {
-        static INSTANCE: OnceLock<NativeRuntime> = OnceLock::new();
+    pub fn get() -> &'static tokio::runtime::Runtime {
+        static INSTANCE: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         INSTANCE.get_or_init(|| {
-            NativeRuntime(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            )
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
         })
     }
 }

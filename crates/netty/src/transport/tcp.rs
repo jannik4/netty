@@ -42,7 +42,7 @@ impl Drop for TcpServerTransport {
 }
 
 impl TcpServerTransport {
-    pub fn bind<A: ToSocketAddrs + Send + 'static>(
+    pub fn bind<A: ToSocketAddrs + Send + Sync + 'static>(
         local_addr: A,
     ) -> (TcpServerTransportAddress, AsyncTransport<Self>) {
         let (local_addr_sender, local_addr_receiver) = oneshot::channel();
@@ -195,7 +195,9 @@ pub struct TcpClientTransport {
 }
 
 impl TcpClientTransport {
-    pub fn connect<A: ToSocketAddrs + Send + 'static>(remote_addr: A) -> AsyncTransport<Self> {
+    pub fn connect<A: ToSocketAddrs + Send + Sync + 'static>(
+        remote_addr: A,
+    ) -> AsyncTransport<Self> {
         AsyncTransport::new(|_| async {
             let stream = TcpStream::connect(remote_addr).await?;
             let (recv, send) = stream.into_split();

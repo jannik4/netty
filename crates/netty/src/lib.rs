@@ -18,9 +18,9 @@ use thiserror::Error;
 
 pub use {
     self::{
-        client::{Client, ClientEvent},
+        client::{AsyncClientTransport, Client, ClientEvent},
         handle::ConnectionHandle,
-        server::{Server, ServerEvent, ServerTransports},
+        server::{AsyncServerTransports, Server, ServerEvent},
     },
     bytes::Bytes,
     channel::Channels,
@@ -170,20 +170,16 @@ mod native_only_tokio {
 mod native_only_tokio {
     pub trait NativeOnlyTokio {}
 
-    impl NativeOnlyTokio for super::NativeRuntime {}
-    impl NativeOnlyTokio for &'static super::NativeRuntime {}
+    impl NativeOnlyTokio for tokio::runtime::Runtime {}
+    impl NativeOnlyTokio for &'static tokio::runtime::Runtime {}
     impl NativeOnlyTokio for Box<dyn super::Runtime> {}
     impl NativeOnlyTokio for std::sync::Arc<dyn super::Runtime> {}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug)]
-pub struct NativeRuntime(pub tokio::runtime::Runtime);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Runtime for NativeRuntime {
+impl Runtime for tokio::runtime::Runtime {
     fn spawn_boxed(&self, f: RuntimeFuture<()>) {
-        self.0.spawn(f);
+        self.spawn(f);
     }
     fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
         Box::pin(tokio::time::sleep(duration))
@@ -191,7 +187,7 @@ impl Runtime for NativeRuntime {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Runtime for &'static NativeRuntime {
+impl Runtime for &'static tokio::runtime::Runtime {
     fn spawn_boxed(&self, f: RuntimeFuture<()>) {
         (*self).spawn_boxed(f);
     }

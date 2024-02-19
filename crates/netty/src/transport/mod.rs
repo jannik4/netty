@@ -87,18 +87,20 @@ pub struct AsyncTransport<T>(
     Box<
         dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + 'static>>
             + Send
+            + Sync
             + 'static,
     >,
     #[cfg(not(target_arch = "wasm32"))]
     Box<
         dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>
             + Send
+            + Sync
             + 'static,
     >,
 );
 
 impl<T> AsyncTransport<T> {
-    pub fn new<F>(f: impl FnOnce(Arc<dyn Runtime>) -> F + Send + 'static) -> Self
+    pub fn new<F>(f: impl FnOnce(Arc<dyn Runtime>) -> F + Send + Sync + 'static) -> Self
     where
         F: Future<Output = Result<T>> + WasmNotSend + 'static,
     {
