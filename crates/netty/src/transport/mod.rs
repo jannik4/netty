@@ -4,10 +4,8 @@ mod tcp;
 #[cfg(not(target_arch = "wasm32"))]
 mod udp;
 
-use crate::{Result, Runtime, WasmNotSend};
-use std::{
-    convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, pin::Pin, sync::Arc,
-};
+use crate::{NettyFuture, Result, Runtime, WasmNotSend};
+use std::{convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -83,20 +81,7 @@ pub struct TransportProperties {
 }
 
 pub struct AsyncTransport<T>(
-    #[cfg(target_arch = "wasm32")]
-    Box<
-        dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + 'static>>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    #[cfg(not(target_arch = "wasm32"))]
-    Box<
-        dyn FnOnce(Arc<dyn Runtime>) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'static>>
-            + Send
-            + Sync
-            + 'static,
-    >,
+    Box<dyn FnOnce(Arc<dyn Runtime>) -> NettyFuture<Result<T>> + Send + Sync + 'static>,
 );
 
 impl<T> AsyncTransport<T> {

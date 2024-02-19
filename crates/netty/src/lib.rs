@@ -115,32 +115,32 @@ struct Channel {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
+pub type NettyFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+pub type NettyFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 pub trait Runtime: native_only_tokio::NativeOnlyTokio + Send + Sync + 'static {
-    fn spawn_boxed(&self, f: RuntimeFuture<()>);
-    fn sleep(&self, duration: Duration) -> RuntimeFuture<()>;
+    fn spawn_boxed(&self, f: NettyFuture<()>);
+    fn sleep(&self, duration: Duration) -> NettyFuture<()>;
 }
 
 impl Runtime for Box<dyn Runtime> {
-    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+    fn spawn_boxed(&self, f: NettyFuture<()>) {
         (**self).spawn_boxed(f);
     }
 
-    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+    fn sleep(&self, duration: Duration) -> NettyFuture<()> {
         (**self).sleep(duration)
     }
 }
 
 impl Runtime for std::sync::Arc<dyn Runtime> {
-    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+    fn spawn_boxed(&self, f: NettyFuture<()>) {
         (**self).spawn_boxed(f);
     }
 
-    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+    fn sleep(&self, duration: Duration) -> NettyFuture<()> {
         (**self).sleep(duration)
     }
 }
@@ -178,20 +178,20 @@ mod native_only_tokio {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime for tokio::runtime::Runtime {
-    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+    fn spawn_boxed(&self, f: NettyFuture<()>) {
         self.spawn(f);
     }
-    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+    fn sleep(&self, duration: Duration) -> NettyFuture<()> {
         Box::pin(tokio::time::sleep(duration))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime for &'static tokio::runtime::Runtime {
-    fn spawn_boxed(&self, f: RuntimeFuture<()>) {
+    fn spawn_boxed(&self, f: NettyFuture<()>) {
         (*self).spawn_boxed(f);
     }
-    fn sleep(&self, duration: Duration) -> RuntimeFuture<()> {
+    fn sleep(&self, duration: Duration) -> NettyFuture<()> {
         (*self).sleep(duration)
     }
 }
