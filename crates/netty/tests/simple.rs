@@ -8,22 +8,23 @@ use netty::{
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
+const TIMEOUT: Duration = Duration::from_secs(5);
+
 #[allow(unused)]
 fn channel_transport(
-) -> (AsyncTransport<ChannelServerTransport>, AsyncTransport<ChannelClientTransport>, u64) {
+) -> (AsyncTransport<ChannelServerTransport>, AsyncTransport<ChannelClientTransport>) {
     let (server, client) = ChannelServerTransport::new_server_client_pair();
-    (server, client, 10)
+    (server, client)
 }
 
 #[allow(unused)]
-fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpClientTransport>, u64)
-{
+fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpClientTransport>) {
     let (server_addr, server) = TcpServerTransport::bind("127.0.0.1:0");
     let client = AsyncTransport::new(|runtime| async {
         let server_addr = server_addr.get().await.unwrap();
         TcpClientTransport::connect(server_addr).start(runtime).await
     });
-    (server, client, 100)
+    (server, client)
 }
 
 #[allow(unused)]
@@ -31,7 +32,6 @@ fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpCli
 fn webtransport_transport() -> (
     AsyncTransport<netty::transport::WebTransportServerTransport>,
     AsyncTransport<netty::transport::WebTransportClientTransport>,
-    u64,
 ) {
     let (server_addr, server) =
         netty::transport::WebTransportServerTransport::bind("127.0.0.1:0".parse().unwrap());
@@ -41,25 +41,34 @@ fn webtransport_transport() -> (
             .start(runtime)
             .await
     });
-    (server, client, 100)
+    (server, client)
 }
 
-#[test]
-fn simple() {
-    let runtime: Arc<dyn Runtime> = Arc::new(
-        tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap(),
-    );
-    run_simple(channel_transport(), Arc::clone(&runtime));
-    run_simple(tcp_transport(), Arc::clone(&runtime));
-    #[cfg(feature = "webtransport")]
-    run_simple(webtransport_transport(), Arc::clone(&runtime));
+macro_rules! simple_test {
+    ($name:ident, $transport:expr) => {
+        #[test]
+        fn $name() {
+            let runtime: Arc<dyn Runtime> = Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            );
+            run_simple($transport, runtime);
+        }
+    };
 }
+
+simple_test!(channel, channel_transport());
+simple_test!(tcp, tcp_transport());
+#[cfg(feature = "webtransport")]
+simple_test!(webtransport, webtransport_transport());
 
 fn run_simple(
-    (server_transport, client_transport, ms): (
+    (server_transport, client_transport): (
         AsyncTransport<impl ServerTransport + Send + Sync + 'static>,
         AsyncTransport<impl ClientTransport + Send + Sync + 'static>,
-        u64,
     ),
     runtime: Arc<dyn Runtime>,
 ) {
@@ -75,11 +84,28 @@ fn run_simple(
         Client::new(Arc::new(channels))
     };
 
+    // Start server
     server.start(server_transport, Arc::clone(&runtime));
-    sleep(ms);
-    client.connect(client_transport, runtime);
-    sleep(ms);
+    'server_up: loop {
+        server.wait_timeout(TIMEOUT);
+        while let Some(event) = server.process_events().next() {
+            match event {
+                ServerEvent::TransportIsUp(_) => (),
+                ServerEvent::ServerIsUp => break 'server_up,
+                _ => panic!("unexpected event: {:?}", event),
+            }
+        }
+    }
+    assert!(server.process_events().next().is_none());
 
+    // Connect client
+    client.connect(client_transport, runtime);
+    client.wait_timeout(TIMEOUT);
+    assert!(matches!(client.process_events().next(), Some(ClientEvent::Connected)));
+    assert!(client.process_events().next().is_none());
+
+    // Accept connection
+    server.wait_timeout(TIMEOUT);
     let server_event = server.process_events().next();
     let client_handle = match server_event {
         Some(ServerEvent::IncomingConnection(incoming)) => server.accept(incoming).unwrap(),
@@ -87,23 +113,24 @@ fn run_simple(
     };
     assert!(server.process_events().next().is_none());
 
-    assert!(matches!(client.process_events().next(), Some(ClientEvent::Connected)));
-    assert!(client.process_events().next().is_none());
-
+    // Send messages
     server.send_to(ServerToClient { data: "Hello Client".to_string() }, client_handle);
     client.send(ClientToServer { data: "Hello Server".to_string() });
-    sleep(ms);
 
+    // Receive messages
+    server.wait_timeout(TIMEOUT);
     let (msg, msg_handle) = server.recv::<ClientToServer>().next().unwrap();
     assert!(msg.data == "Hello Server");
     assert!(msg_handle == client_handle);
 
+    client.wait_timeout(TIMEOUT);
     let msg = client.recv::<ServerToClient>().next().unwrap();
     assert!(msg.data == "Hello Client");
 
+    // Disconnect
     client.disconnect();
-    sleep(ms);
 
+    server.wait_timeout(TIMEOUT);
     assert!(
         matches!(server.process_events().next(), Some(ServerEvent::Disconnected(handle)) if handle == client_handle)
     );
@@ -127,8 +154,4 @@ pub struct ClientToServer {
 impl NetworkMessage for ClientToServer {
     const CHANNEL_ID: ChannelId = ChannelId::new(0);
     const CHANNEL_CONFIG: ChannelConfig = ChannelConfig { reliable: true, ordered: true };
-}
-
-fn sleep(ms: u64) {
-    std::thread::sleep(Duration::from_millis(ms));
 }

@@ -155,6 +155,8 @@ impl<T: ServerTransport + Send + Sync + 'static> Runner<T> {
                 }
             }
         });
+
+        this.intern_events.send(InternEvent::TransportIsUp(this.transport_idx));
     }
 
     async fn tick_recv(&self, buf: &mut [u8]) {

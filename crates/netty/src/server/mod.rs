@@ -22,7 +22,7 @@ enum ServerState {
 }
 
 struct ServerRunning {
-    runners: Vec<Arc<RunnerHandle>>,
+    runners: Vec<(bool, Arc<RunnerHandle>)>,
     intern_send: InternEventSender,
     intern_recv: UnboundedReceiver<InternEvent>,
     connections: HashMap<ConnectionHandle, Arc<ConnectionState>>,
@@ -34,6 +34,7 @@ impl ServerRunning {
     fn runner(&self, transport_idx: TransportIdx) -> &Arc<RunnerHandle> {
         self.runners
             .get(transport_idx.0 as usize)
+            .map(|(_, runner)| runner)
             .unwrap_or_else(|| panic!("transport {} does not exist", transport_idx.0))
     }
 }
@@ -54,15 +55,19 @@ impl Server {
 
         let (intern_send, intern_recv) = mpsc::unbounded_channel();
         let new_data = Arc::new(NewDataAvailable::new());
-        let runners = Box::new(transports).start(ServerTransportsParams {
-            channels: Arc::clone(&self.channels),
-            intern_events: InternEventSender {
-                intern_send: intern_send.clone(),
+        let runners = Box::new(transports)
+            .start(ServerTransportsParams {
+                channels: Arc::clone(&self.channels),
+                intern_events: InternEventSender {
+                    intern_send: intern_send.clone(),
+                    new_data: Arc::clone(&new_data),
+                },
                 new_data: Arc::clone(&new_data),
-            },
-            new_data: Arc::clone(&new_data),
-            runtime,
-        });
+                runtime,
+            })
+            .into_iter()
+            .map(|runner| (false, runner))
+            .collect();
 
         self.state = ServerState::Running(ServerRunning {
             runners,
@@ -209,6 +214,8 @@ impl Server {
 #[derive(Debug)]
 #[cfg_attr(feature = "bevy", derive(bevy_ecs::event::Event))]
 pub enum ServerEvent {
+    TransportIsUp(TransportIdx),
+    ServerIsUp,
     IncomingConnection(IncomingConnection),
     Disconnected(ConnectionHandle),
     DisconnectedSelf(Option<NetworkError>),
@@ -238,6 +245,8 @@ impl std::fmt::Debug for IncomingConnection {
 }
 
 enum InternEvent {
+    TransportIsUp(TransportIdx),
+    ServerIsUp,
     IncomingConnection(ConnectionHandle, Arc<ConnectionState>),
     Disconnected(ConnectionHandle),
     DisconnectedSelf(Option<NetworkError>),
@@ -286,6 +295,16 @@ impl Iterator for ProcessEvents<'_> {
 
                 Some(loop {
                     match event {
+                        InternEvent::TransportIsUp(idx) => {
+                            running.runners[idx.0 as usize].0 = true;
+
+                            if running.runners.iter().all(|(up, _)| *up) {
+                                running.intern_send.send(InternEvent::ServerIsUp);
+                            }
+
+                            break ServerEvent::TransportIsUp(idx);
+                        }
+                        InternEvent::ServerIsUp => break ServerEvent::ServerIsUp,
                         InternEvent::IncomingConnection(handle, connection) => {
                             running.incoming.insert(handle, connection);
                             break ServerEvent::IncomingConnection(IncomingConnection {
