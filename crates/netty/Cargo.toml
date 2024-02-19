@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 default = ["serde"]
 serde = ["dep:serde", "dep:bincode"]
 bevy = ["dep:bevy_ecs"]
+webtransport = ["dep:wtransport"]
 
 [dependencies]
 thiserror = "1.0.49"
@@ -18,6 +19,10 @@ bytes = "1.5.0"
 tinyvec = "1.6.0"
 uuid = { version = "1.5.0", features = ["v4"] }
 double_key_map = { git = "https://github.com/jannik4/double_key_map", rev = "aab092a2f022f371bb34de0e5365c41c56307b53" }
+
+wtransport = { version = "0.1.11", features = [
+    "dangerous-configuration",
+], optional = true }
 
 serde = { version = "1.0.188", optional = true }
 bincode = { version = "1.3.3", optional = true }

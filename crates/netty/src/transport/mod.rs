@@ -3,6 +3,8 @@ mod channel;
 mod tcp;
 #[cfg(not(target_arch = "wasm32"))]
 mod udp;
+#[cfg(all(feature = "webtransport", not(target_arch = "wasm32")))]
+mod webtransport;
 
 use crate::{NettyFuture, Result, Runtime, WasmNotSend};
 use std::{convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, sync::Arc};
@@ -15,6 +17,11 @@ pub use self::channel::{ChannelClientTransport, ChannelServerTransport};
 pub use self::{
     tcp::{TcpClientTransport, TcpServerTransport, TcpServerTransportAddress},
     udp::{UdpClientTransport, UdpServerTransport},
+};
+
+#[cfg(all(feature = "webtransport", not(target_arch = "wasm32")))]
+pub use self::webtransport::{
+    WebTransportClientTransport, WebTransportServerTransport, WebTransportServerTransportAddress,
 };
 
 #[derive(Debug, Error)]

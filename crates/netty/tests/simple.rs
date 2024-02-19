@@ -26,6 +26,24 @@ fn tcp_transport() -> (AsyncTransport<TcpServerTransport>, AsyncTransport<TcpCli
     (server, client, 100)
 }
 
+#[allow(unused)]
+#[cfg(feature = "webtransport")]
+fn webtransport_transport() -> (
+    AsyncTransport<netty::transport::WebTransportServerTransport>,
+    AsyncTransport<netty::transport::WebTransportClientTransport>,
+    u64,
+) {
+    let (server_addr, server) =
+        netty::transport::WebTransportServerTransport::bind("127.0.0.1:0".parse().unwrap());
+    let client = AsyncTransport::new(|runtime| async {
+        let server_addr = server_addr.get().await.unwrap();
+        netty::transport::WebTransportClientTransport::connect(format!("https://{server_addr}"))
+            .start(runtime)
+            .await
+    });
+    (server, client, 100)
+}
+
 #[test]
 fn simple() {
     let runtime: Arc<dyn Runtime> = Arc::new(
@@ -33,6 +51,8 @@ fn simple() {
     );
     run_simple(channel_transport(), Arc::clone(&runtime));
     run_simple(tcp_transport(), Arc::clone(&runtime));
+    #[cfg(feature = "webtransport")]
+    run_simple(webtransport_transport(), Arc::clone(&runtime));
 }
 
 fn run_simple(

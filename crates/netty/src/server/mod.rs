@@ -379,4 +379,41 @@ where
     }
 }
 
+impl<A, B, C> AsyncServerTransports for (AsyncTransport<A>, AsyncTransport<B>, AsyncTransport<C>)
+where
+    A: ServerTransport + Send + Sync + 'static,
+    B: ServerTransport + Send + Sync + 'static,
+    C: ServerTransport + Send + Sync + 'static,
+{
+    fn start(self: Box<Self>, params: ServerTransportsParams) -> Vec<Arc<RunnerHandle>> {
+        let (a, b, c) = *self;
+        vec![
+            Arc::new(runner::start(
+                a,
+                Arc::clone(&params.runtime),
+                TransportIdx(0),
+                Arc::clone(&params.channels),
+                params.intern_events.clone(),
+                Arc::clone(&params.new_data),
+            )),
+            Arc::new(runner::start(
+                b,
+                Arc::clone(&params.runtime),
+                TransportIdx(1),
+                Arc::clone(&params.channels),
+                params.intern_events.clone(),
+                Arc::clone(&params.new_data),
+            )),
+            Arc::new(runner::start(
+                c,
+                params.runtime,
+                TransportIdx(2),
+                params.channels,
+                params.intern_events,
+                params.new_data,
+            )),
+        ]
+    }
+}
+
 // TODO: more tuples ...

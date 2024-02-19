@@ -45,6 +45,9 @@ pub enum NetworkError {
     #[error("transport receive")]
     TransportReceive(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    #[error("transport connect")]
+    TransportConnect(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     #[error("io")]
     Io(#[from] std::io::Error),
 

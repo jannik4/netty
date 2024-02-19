@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["serde"]
 serde = ["netty/serde"]
+webtransport = ["netty/webtransport"]
 
 [dependencies]
 netty = { path = "../netty", default-features = false, features = ["bevy"] }
