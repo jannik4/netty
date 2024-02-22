@@ -11,7 +11,9 @@ license = "MIT OR Apache-2.0"
 default = ["serde"]
 serde = ["dep:serde", "dep:bincode"]
 bevy = ["dep:bevy_ecs"]
-webtransport = ["dep:wtransport"]
+
+# Requires `RUSTFLAGS="--cfg=web_sys_unstable_apis"` on wasm32
+webtransport = ["dep:wtransport", "dep:webtransport_web_sys"]
 
 [dependencies]
 thiserror = "1.0.49"
@@ -20,17 +22,19 @@ tinyvec = "1.6.0"
 uuid = { version = "1.5.0", features = ["v4"] }
 double_key_map = { git = "https://github.com/jannik4/double_key_map", rev = "aab092a2f022f371bb34de0e5365c41c56307b53" }
 
-wtransport = { version = "0.1.11", features = [
-    "dangerous-configuration",
-], optional = true }
-
 serde = { version = "1.0.188", optional = true }
 bincode = { version = "1.3.3", optional = true }
 
 bevy_ecs = { version = "0.12.0", optional = true, default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tokio = { version = "1.36.0", default-features = false, features = ["sync"] }
+tokio = { version = "1.36.0", default-features = false, features = [
+    "sync",
+    "io-util",
+] }
+webtransport_web_sys = { version = "0.1.0", path = "../webtransport_web_sys", features = [
+    "web_sys_unstable_apis",
+], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.36.0", default-features = false, features = [
@@ -40,6 +44,9 @@ tokio = { version = "1.36.0", default-features = false, features = [
     "time",
     "io-util",
 ] }
+wtransport = { version = "0.1.11", features = [
+    "dangerous-configuration",
+], optional = true }
 
 [dev-dependencies]
 serde = { version = "1.0.188", features = ["derive"] }

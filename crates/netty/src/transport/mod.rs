@@ -5,6 +5,8 @@ mod tcp;
 mod udp;
 #[cfg(all(feature = "webtransport", not(target_arch = "wasm32")))]
 mod webtransport;
+#[cfg(all(feature = "webtransport", target_arch = "wasm32"))]
+mod webtransport_wasm;
 
 use crate::{NettyFuture, Result, Runtime, WasmNotSend};
 use std::{convert::Infallible, fmt::Debug, future::Future, hash::Hash, ops::Deref, sync::Arc};
@@ -23,6 +25,9 @@ pub use self::{
 pub use self::webtransport::{
     WebTransportClientTransport, WebTransportServerTransport, WebTransportServerTransportAddress,
 };
+
+#[cfg(all(feature = "webtransport", target_arch = "wasm32"))]
+pub use self::webtransport_wasm::WebTransportClientTransport;
 
 #[derive(Debug, Error)]
 pub enum TransportError<C> {
