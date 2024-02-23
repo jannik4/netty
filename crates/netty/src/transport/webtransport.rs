@@ -57,7 +57,7 @@ impl WebTransportServerTransport {
                             .map_err(|err| NetworkError::TransportConnect(Box::new(err)))?
                     }
                     WebTransportServerTransportCertificate::SelfSigned => {
-                        Certificate::self_signed::<&[&str], _>(&[])
+                        Certificate::self_signed(&[&local_addr.ip().to_string()])
                     }
                 };
                 let hashes = certificate.hashes().into_iter().map(|hash| *hash.as_ref()).collect();
