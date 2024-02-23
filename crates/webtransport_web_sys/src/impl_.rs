@@ -1,4 +1,4 @@
-use js_sys::{Reflect, Uint8Array};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use send_wrapper::SendWrapper;
 use std::{
     fmt,
@@ -19,8 +19,26 @@ pub struct WebTransport {
 }
 
 impl WebTransport {
-    pub async fn connect(url: &str) -> Result<Self> {
-        let transport = SendWrapper::new(web_sys::WebTransport::new(url)?);
+    pub async fn connect(url: &str, hashes: Option<Vec<[u8; 32]>>) -> Result<Self> {
+        let mut options = web_sys::WebTransportOptions::new();
+        if let Some(hashes) = hashes {
+            let hashes = hashes
+                .into_iter()
+                .map(|hash| {
+                    let item = Object::new();
+                    Reflect::set(&item, &"algorithm".into(), &"sha-256".into());
+                    Reflect::set(
+                        &item,
+                        &"value".into(),
+                        &Uint8Array::from(&hash[..]).buffer().into(),
+                    );
+                    JsValue::from(item)
+                })
+                .collect::<Array>();
+            options.server_certificate_hashes(&hashes);
+        }
+
+        let transport = SendWrapper::new(web_sys::WebTransport::new_with_options(url, &options)?);
         JsFuture::from(transport.ready()).await?;
         Ok(Self { transport })
     }

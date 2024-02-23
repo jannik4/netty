@@ -7,6 +7,7 @@ use std::{
     convert::Infallible,
     io::{self, ErrorKind},
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -40,6 +41,7 @@ impl Drop for WebTransportServerTransport {
 impl WebTransportServerTransport {
     pub fn bind(
         local_addr: SocketAddr,
+        certificate: WebTransportServerTransportCertificate,
     ) -> (WebTransportServerTransportAddress, AsyncTransport<Self>) {
         let (local_addr_sender, local_addr_receiver) = oneshot::channel();
 
@@ -48,14 +50,25 @@ impl WebTransportServerTransport {
             AsyncTransport::new(move |runtime: Arc<dyn Runtime>| async move {
                 let is_alive = Arc::new(AtomicBool::new(true));
 
-                let certificate = Certificate::self_signed::<&[&str], _>(&[]); // TODO: ???
+                let certificate = match certificate {
+                    WebTransportServerTransportCertificate::Load { cert, key } => {
+                        Certificate::load(cert, key)
+                            .await
+                            .map_err(|err| NetworkError::TransportConnect(Box::new(err)))?
+                    }
+                    WebTransportServerTransportCertificate::SelfSigned => {
+                        Certificate::self_signed::<&[&str], _>(&[])
+                    }
+                };
+                let hashes = certificate.hashes().into_iter().map(|hash| *hash.as_ref()).collect();
+
                 let config = ServerConfig::builder()
                     .with_bind_address(local_addr)
                     .with_certificate(certificate)
                     .build();
 
                 let endpoint = Endpoint::server(config)?;
-                local_addr_sender.send(endpoint.local_addr()?).ok();
+                local_addr_sender.send((endpoint.local_addr()?, hashes)).ok();
                 let connections = Arc::new(RwLock::new(HashMap::new()));
                 let (sender, receiver) = mpsc::unbounded_channel();
 
@@ -197,14 +210,20 @@ impl ServerTransport for WebTransportServerTransport {
 }
 
 #[derive(Debug)]
-pub struct WebTransportServerTransportAddress(oneshot::Receiver<SocketAddr>);
+pub enum WebTransportServerTransportCertificate {
+    SelfSigned,
+    Load { cert: PathBuf, key: PathBuf },
+}
+
+#[derive(Debug)]
+pub struct WebTransportServerTransportAddress(oneshot::Receiver<(SocketAddr, Vec<[u8; 32]>)>);
 
 impl WebTransportServerTransportAddress {
-    pub async fn get(self) -> Option<SocketAddr> {
+    pub async fn get(self) -> Option<(SocketAddr, Vec<[u8; 32]>)> {
         self.0.await.ok()
     }
 
-    pub fn try_get(&mut self) -> Option<SocketAddr> {
+    pub fn try_get(&mut self) -> Option<(SocketAddr, Vec<[u8; 32]>)> {
         self.0.try_recv().ok()
     }
 }
@@ -217,11 +236,25 @@ pub struct WebTransportClientTransport {
 }
 
 impl WebTransportClientTransport {
-    pub fn connect(url: impl ToString) -> AsyncTransport<Self> {
+    pub fn connect(
+        url: impl ToString,
+        cert_validation: WebTransportClientTransportCertificateValidation,
+    ) -> AsyncTransport<Self> {
         let url = url.to_string();
         AsyncTransport::new(|_| async {
-            let config =
-                ClientConfig::builder().with_bind_default().with_no_cert_validation().build();
+            let config = ClientConfig::builder().with_bind_default();
+            let config = match cert_validation {
+                WebTransportClientTransportCertificateValidation::UnsecureNoValidation => {
+                    config.with_no_cert_validation()
+                }
+                WebTransportClientTransportCertificateValidation::CertificateHashes(hashes) => {
+                    config.with_server_certificate_hashes(hashes.into_iter().map(From::from))
+                }
+                WebTransportClientTransportCertificateValidation::NativeCerts => {
+                    config.with_native_certs()
+                }
+            };
+            let config = config.build();
             let connection = Endpoint::client(config)?
                 .connect(url)
                 .await
@@ -270,6 +303,13 @@ impl ClientTransport for WebTransportClientTransport {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum WebTransportClientTransportCertificateValidation {
+    UnsecureNoValidation,
+    CertificateHashes(Vec<[u8; 32]>),
+    NativeCerts,
 }
 
 async fn impl_send<S>(stream: &mut S, buf: &[u8]) -> io::Result<()>

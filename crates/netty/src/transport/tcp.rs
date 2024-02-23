@@ -83,7 +83,7 @@ impl TcpServerTransport {
                 Ok((stream, addr)) => (stream, addr),
                 Err(_e) => {
                     // TODO: send error in channel so that recv_from can return it
-                    runtime.sleep(Duration::from_millis(100));
+                    runtime.sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             };

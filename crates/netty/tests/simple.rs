@@ -33,13 +33,20 @@ fn webtransport_transport() -> (
     AsyncTransport<netty::transport::WebTransportServerTransport>,
     AsyncTransport<netty::transport::WebTransportClientTransport>,
 ) {
-    let (server_addr, server) =
-        netty::transport::WebTransportServerTransport::bind("127.0.0.1:0".parse().unwrap());
+    let (server_addr, server) = netty::transport::WebTransportServerTransport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        netty::transport::WebTransportServerTransportCertificate::SelfSigned,
+    );
     let client = AsyncTransport::new(|runtime| async {
-        let server_addr = server_addr.get().await.unwrap();
-        netty::transport::WebTransportClientTransport::connect(format!("https://{server_addr}"))
-            .start(runtime)
-            .await
+        let (server_addr, hashes) = server_addr.get().await.unwrap();
+        netty::transport::WebTransportClientTransport::connect(
+            format!("https://{server_addr}"),
+            netty::transport::WebTransportClientTransportCertificateValidation::CertificateHashes(
+                hashes,
+            ),
+        )
+        .start(runtime)
+        .await
     });
     (server, client)
 }

@@ -23,7 +23,9 @@ pub use self::{
 
 #[cfg(all(feature = "webtransport", not(target_arch = "wasm32")))]
 pub use self::webtransport::{
-    WebTransportClientTransport, WebTransportServerTransport, WebTransportServerTransportAddress,
+    WebTransportClientTransport, WebTransportClientTransportCertificateValidation,
+    WebTransportServerTransport, WebTransportServerTransportAddress,
+    WebTransportServerTransportCertificate,
 };
 
 #[cfg(all(feature = "webtransport", target_arch = "wasm32"))]

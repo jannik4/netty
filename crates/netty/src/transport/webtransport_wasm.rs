@@ -18,10 +18,10 @@ pub struct WebTransportClientTransport {
 }
 
 impl WebTransportClientTransport {
-    pub fn connect(url: impl ToString) -> AsyncTransport<Self> {
+    pub fn connect(url: impl ToString, hashes: Option<Vec<[u8; 32]>>) -> AsyncTransport<Self> {
         let url = url.to_string();
         AsyncTransport::new(|_| async move {
-            let connection = WebTransport::connect(&url)
+            let connection = WebTransport::connect(&url, hashes)
                 .await
                 .map_err(|err| NetworkError::TransportConnect(Box::new(err)))?;
             let bi = connection
