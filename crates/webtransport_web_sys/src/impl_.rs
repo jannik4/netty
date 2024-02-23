@@ -26,12 +26,13 @@ impl WebTransport {
                 .into_iter()
                 .map(|hash| {
                     let item = Object::new();
-                    Reflect::set(&item, &"algorithm".into(), &"sha-256".into());
+                    Reflect::set(&item, &"algorithm".into(), &"sha-256".into()).unwrap();
                     Reflect::set(
                         &item,
                         &"value".into(),
                         &Uint8Array::from(&hash[..]).buffer().into(),
-                    );
+                    )
+                    .unwrap();
                     JsValue::from(item)
                 })
                 .collect::<Array>();
