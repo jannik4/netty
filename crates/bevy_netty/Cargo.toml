@@ -15,10 +15,10 @@ webtransport = ["netty/webtransport"]
 [dependencies]
 netty = { path = "../netty", default-features = false, features = ["bevy"] }
 
-bevy_app = { version = "0.12.0", default-features = false }
-bevy_ecs = { version = "0.12.0", default-features = false }
-bevy_tasks = { version = "0.12.0", default-features = false }
-bevy_log = { version = "0.12.0", default-features = false }
+bevy_app = { version = "0.13.0", default-features = false }
+bevy_ecs = { version = "0.13.0", default-features = false }
+bevy_tasks = { version = "0.13.0", default-features = false }
+bevy_log = { version = "0.13.0", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = { version = "0.3.0", features = ["futures"] }
