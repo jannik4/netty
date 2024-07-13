@@ -32,9 +32,7 @@ impl ServerChannelsBuilder<'_> {
         self.0.add_event::<FromClient<T>>();
         self.0.add_systems(
             First,
-            handle_recv::<T>
-                .after(event_update_system::<FromClient<T>>)
-                .after(process_server_events),
+            handle_recv::<T>.after(event_update_system).after(process_server_events),
         );
 
         self.1.add_recv::<T>();

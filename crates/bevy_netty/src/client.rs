@@ -26,9 +26,7 @@ impl ClientChannelsBuilder<'_> {
         self.0.add_event::<FromServer<T>>();
         self.0.add_systems(
             First,
-            handle_recv::<T>
-                .after(event_update_system::<FromServer<T>>)
-                .after(process_client_events),
+            handle_recv::<T>.after(event_update_system).after(process_client_events),
         );
 
         self.1.add_recv::<T>();

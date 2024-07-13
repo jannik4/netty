@@ -15,14 +15,10 @@ pub struct NettyPlugin;
 
 impl Plugin for NettyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_event::<ServerEvent>().add_systems(
-            First,
-            server::process_server_events.after(event_update_system::<ServerEvent>),
-        );
-        app.add_event::<ClientEvent>().add_systems(
-            First,
-            client::process_client_events.after(event_update_system::<ClientEvent>),
-        );
+        app.add_event::<ServerEvent>()
+            .add_systems(First, server::process_server_events.after(event_update_system));
+        app.add_event::<ClientEvent>()
+            .add_systems(First, client::process_client_events.after(event_update_system));
     }
 }
 
